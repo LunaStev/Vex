@@ -1,0 +1,6 @@
+[package]
+name = "vex"
+version = "0.0.1-pre-alpha"
+edition = "2021"
+
+[dependencies]
