@@ -3,6 +3,7 @@ use crate::init::run;
 
 mod init;
 mod run;
+mod info;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
