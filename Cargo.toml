@@ -4,3 +4,4 @@ version = "0.0.1-pre-alpha"
 edition = "2021"
 
 [dependencies]
+wson_rs = "0.1.1"
