@@ -19,7 +19,7 @@ pub fn run(is_lib: bool) {
     let wave_path = src_dir.join(file_name);
 
     fs::create_dir_all(src_dir).expect("Failed to create src directory");
-    fs::write(&wave_path, "// Your Wave code starts here\n\nfun main() {\n    println(\"Hello World\");\n}").expect("Failed to create .wave file");
+    fs::write(&wave_path, "fun main() {\n    println(\"Hello World\");\n}").expect("Failed to create .wave file");
 
     let content = format!(
         r#"{{
