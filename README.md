@@ -1,5 +1,11 @@
 # Vex
 
+---
+
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/LunaStev/Vex?)
+
+---
+
 Vex is the official package manager and build tool for the Wave programming language. It enables simple, unified project setup and execution using a minimal set of commands. Vex uses WSON (Wave Serialized Object Notation) for managing metadata and configurations.
 
 ## Features
