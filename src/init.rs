@@ -1,7 +1,7 @@
 use std::{env, fs};
 use std::path::Path;
 
-pub fn run(is_lib: bool) {
+pub fn init(is_lib: bool) {
     let vex_path = Path::new("vex.ws");
     let src_dir = Path::new("src");
 
