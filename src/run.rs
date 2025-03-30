@@ -5,8 +5,9 @@ pub fn run() {
     let vex_ws = fs::read_to_string("vex.ws").expect("vex.ws not found");
 
     match loads(&vex_ws) {
-        Ok(data) => {
-            println!("✅ Loaded vex.ws");
+        Ok(..) => {
+            let src_dir = Path::new("src");
+            let mut main_file: Option<String> = None;
 
             if let Some(WsonValue::Bool(is_lib)) = data.get("lib") {
                 println!("Project type: {}", if *is_lib { "Library" } else { "Binary" });
