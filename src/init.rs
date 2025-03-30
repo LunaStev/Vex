@@ -15,6 +15,8 @@ pub fn run(is_lib: bool) {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "wave_project".to_string());
 
+    let author = get_username().expect("Cannot get username");
+
     let file_name = if is_lib { "lib.wave" } else { "main.wave" };
     let wave_path = src_dir.join(file_name);
 
