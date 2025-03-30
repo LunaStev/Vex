@@ -12,8 +12,19 @@ pub fn run() {
                 println!("Project type: {}", if *is_lib { "Library" } else { "Binary" });
             }
 
-            if let Some(WsonValue::Version(ver)) = data.get("version") {
-                println!("Version: {}", ver.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("."));
+            if let Some(main_path) = main_file {
+                println!("🚀 Running {main_path}...");
+                let status = Command::new("wave")
+                    .arg("run")
+                    .arg(&main_path)
+                    .status()
+                    .expect("failed to run wave");
+
+                if !status.success() {
+                    println!("❌ Wave execution failed");
+                }
+            } else {
+                println!("❌ No file with `fn main()` found in src/");
             }
         }
         Err(e) => {
