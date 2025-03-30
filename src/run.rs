@@ -11,8 +11,20 @@ pub fn run() {
             let src_dir = Path::new("src");
             let mut main_file: Option<String> = None;
 
-            if let Some(WsonValue::Bool(is_lib)) = data.get("lib") {
-                println!("Project type: {}", if *is_lib { "Library" } else { "Binary" });
+            if src_dir.is_dir() {
+                for entry in fs::read_dir(src_dir).expect("failed to read src dir") {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) == Some("wave") {
+                            if let Ok(contents) = fs::read_to_string(&path) {
+                                if contents.contains("fun main()") {
+                                    main_file = Some(path.to_string_lossy().to_string());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             if let Some(main_path) = main_file {
