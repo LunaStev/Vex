@@ -39,3 +39,11 @@ pub fn run(is_lib: bool) {
 
     println!("✅ Project initialized successfully: {file_name}");
 }
+
+fn get_username() -> Option<String> {
+    if cfg!(windows) {
+        env::var("USERNAME").ok()
+    } else {
+        env::var("USER").ok()
+    }
+}
