@@ -13,7 +13,7 @@ fn main() {
     let is_lib = args.iter().any(|arg| arg == "--lib");
 
     if args.len() >= 2 && args[1] == "init" {
-        run(is_lib);
+        init(is_lib);
     } else if args.len() >= 2 && args[1] == "info" {
         info();
     } else if args.len() >= 2 && args[1] == "run" {
