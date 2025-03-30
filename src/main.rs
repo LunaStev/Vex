@@ -1,3 +1,4 @@
+use crate::check::check;
 use crate::info::info;
 use crate::init::init;
 use crate::run::run;
