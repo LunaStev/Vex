@@ -16,6 +16,10 @@ fn main() {
         run(is_lib);
     } else if args.len() >= 2 && args[1] == "info" {
         info();
+    } else if args.len() >= 2 && args[1] == "run" {
+        run();
+    } else if args.len() >= 2 && args[1] == "check" {
+        check();
     } else {
         println!("❌ Unknown command.");
     }
