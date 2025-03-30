@@ -1,5 +1,6 @@
 use crate::info::info;
-use crate::init::run;
+use crate::init::init;
+use crate::run::run;
 
 mod init;
 mod run;
