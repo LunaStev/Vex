@@ -1,4 +1,4 @@
-use wson_rs::{loads, WsonValue};
+use wson_rs::{loads};
 use std::fs;
 
 pub fn run() {
