@@ -26,6 +26,9 @@ pub fn run(is_lib: bool) {
     name = "{dir_name}",
     version = 0.1.0,
     lib = {is_lib},
+    description = "{dir_name} Project",
+    author = "{author}",
+    license = "Unknown",
 
     // library
     dependencies = []
