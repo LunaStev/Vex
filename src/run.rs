@@ -1,5 +1,7 @@
 use wson_rs::{loads};
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 pub fn run() {
     let vex_ws = fs::read_to_string("vex.ws").expect("vex.ws not found");
