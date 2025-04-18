@@ -15,6 +15,34 @@ pub fn check() {
             if let Some(WsonValue::Version(ver)) = data.get("version") {
                 println!("Version: {}", ver.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("."));
             }
+
+            if let Some(WsonValue::String(author)) = data.get("author") {
+                println!("Author: {}", author);
+            }
+
+            if let Some(WsonValue::String(license)) = data.get("license") {
+                println!("License: {}", license);
+            }
+
+            if let Some(WsonValue::Array(deps)) = data.get("dependencies") {
+                println!("Dependencies:");
+
+                for dep in deps {
+                    if let WsonValue::Object(obj) = dep {
+                        let name = match obj.get("name") {
+                            Some(WsonValue::String(s)) => s,
+                            _ => "<unknown>",
+                        };
+
+                        let version = match obj.get("version") {
+                            Some(WsonValue::Version(v)) => v.iter().map(|n| n.to_string()).collect::<Vec<_>>().join("."),
+                            _ => "<unknown>".to_string(),
+                        };
+
+                        println!("- {} v{}", name, version);
+                    }
+                }
+            }
         }
         Err(e) => {
             println!("❌ Failed to parse vex.ws: {e}");
