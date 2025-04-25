@@ -29,7 +29,7 @@ pub fn run() {
 
             if let Some(main_path) = main_file {
                 println!("🚀 Running {main_path}...");
-                let status = Command::new("wave")
+                let status = Command::new("wavec")
                     .arg("run")
                     .arg(&main_path)
                     .status()
