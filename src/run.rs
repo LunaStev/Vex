@@ -28,7 +28,7 @@ pub fn run() {
             }
 
             if let Some(main_path) = main_file {
-                println!("🚀 Running {main_path}...");
+                println!("Running {main_path}...");
                 let status = Command::new("wavec")
                     .arg("run")
                     .arg(&main_path)
@@ -36,10 +36,10 @@ pub fn run() {
                     .expect("failed to run wave");
 
                 if !status.success() {
-                    println!("❌ Wave execution failed");
+                    println!("Wave execution failed");
                 }
             } else {
-                println!("❌ No file with `fn main()` found in src/");
+                println!("No file with `fn main()` found in src/");
             }
         }
         Err(e) => {
