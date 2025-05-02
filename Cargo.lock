@@ -68,6 +68,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "colorex"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af9b0482ec6d1b2a68c8959f7adbd361b3f69166ff76582eadd9ffb4904dbde7"
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -220,6 +226,7 @@ checksum = "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"
 name = "vex"
 version = "0.0.1-pre-alpha"
 dependencies = [
+ "colorex",
  "wson_rs",
 ]
 
@@ -362,10 +369,11 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "wson_rs"
-version = "0.1.1"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6014f7adee2f5d9acaedb339bbe5eba67c0598d2bd358414a444787466400c28"
+checksum = "60b309665dd25ebb3cee482c8554399f457b72bedd5095e38c49ae9ba8c00c6d"
 dependencies = [
  "chrono",
+ "once_cell",
  "regex",
 ]
