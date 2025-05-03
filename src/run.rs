@@ -7,7 +7,7 @@ pub fn run() {
     let vex_ws = fs::read_to_string("vex.ws").expect("vex.ws not found");
 
     match loads(&vex_ws) {
-        Ok(..) => {
+        Ok(..) => unsafe {
             let src_dir = Path::new("src");
             let mut main_file: Option<String> = None;
 
