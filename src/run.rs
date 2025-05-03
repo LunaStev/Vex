@@ -29,15 +29,7 @@ pub fn run() {
 
             if let Some(main_path) = main_file {
                 println!("Running {main_path}...");
-                let status = Command::new("wavec")
-                    .arg("run")
-                    .arg(&main_path)
-                    .status()
-                    .expect("failed to run wave");
-
-                if !status.success() {
-                    println!("Wave execution failed");
-                }
+                compile_and_run(main_path.as_ref());
             } else {
                 println!("No file with `fn main()` found in src/");
             }
