@@ -1,7 +1,9 @@
-use crate::check::check;
-use crate::info::info;
-use crate::init::init;
-use crate::run::run;
+use wavec::version_wave;
+use commands::check::check;
+use commands::info::info;
+use commands::init::init;
+use commands::run::run;
+use crate::version::version_vex;
 
 mod init;
 mod run;
