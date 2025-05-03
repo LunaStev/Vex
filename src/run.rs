@@ -2,6 +2,7 @@ use wson_rs::{loads};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use wavec::compile_and_run;
 
 pub fn run() {
     let vex_ws = fs::read_to_string("vex.ws").expect("vex.ws not found");
