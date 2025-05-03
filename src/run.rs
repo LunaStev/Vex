@@ -1,7 +1,6 @@
 use wson_rs::{loads};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use wavec::compile_and_run;
 
 pub fn run() {
