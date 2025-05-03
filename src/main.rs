@@ -5,10 +5,8 @@ use commands::init::init;
 use commands::run::run;
 use crate::version::version_vex;
 
-mod init;
-mod run;
-mod info;
-mod check;
+mod commands;
+mod version;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
