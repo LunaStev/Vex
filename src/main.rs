@@ -21,6 +21,9 @@ fn main() {
         run();
     } else if args.len() >= 2 && args[1] == "check" {
         check();
+    } else if args.len() >= 2 && (args[1] == "--version" || args[1] == "-V") {
+        version_vex();
+        version_wave();
     } else {
         println!("❌ Unknown command.");
     }
