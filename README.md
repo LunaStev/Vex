@@ -85,6 +85,7 @@ vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
 vex fetch [--locked] [--offline]
 vex update [<package>...]
 vex info
+vex tree [--locked] [--offline]
 vex setup wavec [--version <version>]
 vex --version
 ```
@@ -177,6 +178,17 @@ vex update alpha shared_core
 ```
 
 Commit `vex.lock` so the same manifest and lockfile select the same dependency graph. A dry run never fetches or rewrites dependencies; use `vex fetch` first when the locked checkout is not available locally.
+
+Inspect the resolved graph, including path sources, Git selectors, and short
+locked commit IDs:
+
+```sh
+vex tree
+vex tree --locked --offline
+```
+
+Shared transitive dependencies are expanded once and marked with `(*)` when
+they appear again.
 
 ### Reproducible and Offline Modes
 

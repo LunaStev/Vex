@@ -5,6 +5,7 @@ use crate::commands::info::info;
 use crate::commands::init::init;
 use crate::commands::run::run;
 use crate::commands::setup::install_wavec;
+use crate::commands::tree::tree;
 use crate::version::version_vex;
 
 mod commands;
@@ -32,6 +33,7 @@ fn main() {
         "fetch" => fetch(false, &args[1..]),
         "update" => fetch(true, &args[1..]),
         "info" => info(&args[1..]),
+        "tree" => tree(&args[1..]),
         "setup" => setup(&args[1..]),
         "--version" | "-V" | "version" if args.len() == 1 => version_vex(),
         "--help" | "-h" | "help" if args.len() == 1 => print_help(),
@@ -104,6 +106,7 @@ fn print_help() {
     println!("  vex fetch [--locked] [--offline]");
     println!("  vex update [<package>...]");
     println!("  vex info");
+    println!("  vex tree [--locked] [--offline]");
     println!("  vex setup wavec [--version <version>]");
     println!("  vex --version");
 }
