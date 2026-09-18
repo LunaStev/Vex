@@ -39,6 +39,7 @@ fn help_is_read_only_and_succeeds_without_a_manifest() {
         &["fetch", "--help"],
         &["update", "--help"],
         &["info", "--help"],
+        &["tree", "--help"],
         &["setup", "--help"],
         &["setup", "wavec", "--help"],
     ] {
@@ -116,6 +117,64 @@ fn dependencies_must_be_library_packages_with_src_lib_wave() {
     )
     .unwrap();
     assert_success(&vex(&app, &["fetch"]), "fetch canonical library");
+}
+
+#[test]
+fn tree_prints_locked_direct_and_transitive_dependencies() {
+    let fixture = TestDir::new();
+    let app = fixture.0.join("app");
+    let alpha = fixture.0.join("alpha");
+    let shared = fixture.0.join("shared");
+    let leaf = fixture.0.join("leaf");
+    for package in [&app, &alpha, &shared, &leaf] {
+        fs::create_dir_all(package.join("src")).unwrap();
+    }
+    fs::write(
+        app.join("vex.ws"),
+        "{ name = \"app\", version = 0.1.0, dependencies = [{ name = \"shared\", path = \"../shared\" }, { name = \"alpha\", path = \"../alpha\" }] }\n",
+    )
+    .unwrap();
+    fs::write(
+        alpha.join("vex.ws"),
+        "{ name = \"alpha\", version = 1.0.0, lib = true, dependencies = [{ name = \"shared\", path = \"../shared\" }] }\n",
+    )
+    .unwrap();
+    fs::write(
+        shared.join("vex.ws"),
+        "{ name = \"shared\", version = 2.0.0, lib = true, dependencies = [{ name = \"leaf\", path = \"../leaf\" }] }\n",
+    )
+    .unwrap();
+    fs::write(
+        leaf.join("vex.ws"),
+        "{ name = \"leaf\", version = 3.0.0, lib = true, dependencies = [] }\n",
+    )
+    .unwrap();
+    for package in [&alpha, &shared, &leaf] {
+        fs::write(package.join("src/lib.wave"), "pub fun marker() {}\n").unwrap();
+    }
+
+    let first = vex(&app, &["tree"]);
+    assert_success(&first, "resolve dependency tree");
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(stdout.contains("app v0.1.0"), "{stdout}");
+    assert!(
+        stdout.contains("├── alpha v1.0.0 (path ../alpha)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("│   └── shared v2.0.0 (path ../shared)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("leaf v3.0.0 (path ../leaf)"), "{stdout}");
+    assert!(
+        stdout.contains("└── shared v2.0.0 (path ../shared) (*)"),
+        "{stdout}"
+    );
+    assert!(app.join("vex.lock").is_file());
+
+    let locked = vex(&app, &["tree", "--locked", "--offline"]);
+    assert_success(&locked, "print locked offline dependency tree");
+    assert_eq!(first.stdout, locked.stdout);
 }
 
 fn vex(path: &PathBuf, args: &[&str]) -> Output {

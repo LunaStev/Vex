@@ -63,6 +63,10 @@ impl Resolution {
     pub fn package_count(&self) -> usize {
         self.packages.len()
     }
+
+    pub fn packages(&self) -> &[LockedPackage] {
+        &self.packages
+    }
 }
 
 pub fn resolve(manifest: &Manifest, options: ResolveOptions) -> Result<Resolution, String> {
