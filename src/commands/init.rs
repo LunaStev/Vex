@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::lockfile::{write_lockfile, Lockfile};
@@ -64,7 +65,7 @@ fn run_init(is_lib: bool) -> Result<(), String> {
     }
 
     let source_template = if is_lib {
-        "fun greet() {\n    println(\"Hello from library\");\n}\n"
+        "pub fun greet() {\n    println(\"Hello from library\");\n}\n"
     } else {
         "fun main() {\n    println(\"Hello World\");\n}\n"
     };
@@ -76,10 +77,22 @@ fn run_init(is_lib: bool) -> Result<(), String> {
     fs::write(manifest_path, manifest_text)
         .map_err(|e| format!("failed to write `{MANIFEST_FILE}`: {e}"))?;
 
-    fs::create_dir_all(".vex/deps").map_err(|e| format!("failed to create .vex/deps: {e}"))?;
-
     let _manifest = Manifest::load()?;
     write_lockfile(&Lockfile::empty())?;
+
+    if !Path::new(".gitignore").exists() {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(".gitignore")
+        {
+            Ok(mut file) => file
+                .write_all(b"/target/\n/.vex/\n")
+                .map_err(|e| format!("failed to write `.gitignore`: {e}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(format!("failed to create `.gitignore`: {error}")),
+        }
+    }
 
     println!("initialized Wave project");
     println!("created {MANIFEST_FILE}, vex.lock, and src/{source_file}");

@@ -104,12 +104,6 @@ pub fn resolve(manifest: &Manifest, options: ResolveOptions) -> Result<Resolutio
     let locked = options.locked;
     let dry_run = options.dry_run;
     validate_managed_root(&root, &dep_root)?;
-    if !options.dry_run {
-        fs::create_dir_all(&dep_root)
-            .map_err(|e| format!("failed to create `{}`: {e}", dep_root.display()))?;
-        validate_managed_root(&root, &dep_root)?;
-    }
-
     let mut resolver = Resolver {
         options,
         root,
@@ -435,7 +429,7 @@ impl Resolver<'_> {
                     dependency.name
                 )
             })?;
-            require_checkout_at(destination, url, &commit)?;
+            require_checkout_at(destination, url, &dependency.name, &commit)?;
             return Ok(commit);
         }
 
@@ -447,18 +441,19 @@ impl Resolver<'_> {
                 )
             })?;
             require_local_repository(destination, url, &dependency.name, &commit)?;
-            checkout_commit(destination, &commit)?;
+            checkout_commit(destination, &dependency.name, &commit)?;
             return Ok(commit);
         }
 
         ensure_repository(destination, url, &dependency.name)?;
+        reject_dirty_checkout(destination, &dependency.name)?;
 
         if let Some(commit) = locked {
             if !git_has_commit(destination, &commit)? {
                 ui::status("Fetching", format!("{} ({url})", dependency.name));
                 git_fetch(destination)?;
             }
-            checkout_commit(destination, &commit)?;
+            checkout_commit(destination, &dependency.name, &commit)?;
             return Ok(commit);
         }
 
@@ -482,7 +477,7 @@ impl Resolver<'_> {
             ]),
             "resolve Git dependency reference",
         )?;
-        checkout_commit(destination, &commit)?;
+        checkout_commit(destination, &dependency.name, &commit)?;
         Ok(commit)
     }
 }
@@ -624,7 +619,12 @@ fn git_has_commit(destination: &Path, commit: &str) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
-fn require_checkout_at(destination: &Path, url: &str, commit: &str) -> Result<(), String> {
+fn require_checkout_at(
+    destination: &Path,
+    url: &str,
+    name: &str,
+    commit: &str,
+) -> Result<(), String> {
     validate_managed_checkout_path(destination)?;
     if !destination.join(".git").is_dir() {
         return Err(format!(
@@ -633,6 +633,7 @@ fn require_checkout_at(destination: &Path, url: &str, commit: &str) -> Result<()
         ));
     }
     verify_origin(destination, url)?;
+    reject_dirty_checkout(destination, name)?;
     let current = git_stdout(
         git_command_in(destination).args(["rev-parse", "HEAD"]),
         "read Git dependency HEAD",
@@ -646,7 +647,8 @@ fn require_checkout_at(destination: &Path, url: &str, commit: &str) -> Result<()
     Ok(())
 }
 
-fn checkout_commit(destination: &Path, commit: &str) -> Result<(), String> {
+fn checkout_commit(destination: &Path, name: &str, commit: &str) -> Result<(), String> {
+    reject_dirty_checkout(destination, name)?;
     let current = git_stdout(
         git_command_in(destination).args(["rev-parse", "HEAD"]),
         "read Git dependency HEAD",
@@ -655,21 +657,30 @@ fn checkout_commit(destination: &Path, commit: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    run_git(
+        git_command_in(destination).args(["checkout", "--detach", commit]),
+        "checkout locked Git dependency commit",
+    )?;
+    reject_dirty_checkout(destination, name)
+}
+
+fn reject_dirty_checkout(destination: &Path, name: &str) -> Result<(), String> {
     let dirty = git_stdout(
-        git_command_in(destination).args(["status", "--porcelain"]),
+        git_command_in(destination).args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ]),
         "inspect Git dependency checkout",
     )?;
     if !dirty.is_empty() {
         return Err(format!(
-            "managed dependency checkout `{}` has local changes\nhelp: preserve or remove those changes before running Vex",
+            "managed Git dependency `{name}` at `{}` has local changes\nhelp: preserve those changes outside the managed checkout, then restore it and rerun `vex fetch`; Vex will not discard your files",
             destination.display()
         ));
     }
-
-    run_git(
-        git_command_in(destination).args(["checkout", "--detach", commit]),
-        "checkout locked Git dependency commit",
-    )
+    Ok(())
 }
 
 fn git_command_in(destination: &Path) -> Command {
