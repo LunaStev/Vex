@@ -96,11 +96,15 @@ vex --version
 my_project/
 ├── src/
 │   └── main.wave
+├── .gitignore
 ├── vex.ws
-├── vex.lock
-└── .vex/
-    └── deps/
+└── vex.lock
 ```
+
+`vex init --lib` creates `src/lib.wave` with a public `greet` example instead
+of a binary entry point. Initialization writes a project `.gitignore` for
+`/target/` and `/.vex/` only when one does not already exist. The managed
+`.vex/deps/` directory is created only when a Git dependency needs a checkout.
 
 ## Manifest
 
@@ -149,6 +153,11 @@ Git dependency:
 A dependency entry must use exactly one of `path` or `git`. Git dependencies may specify at most one of `branch`, `tag`, or `rev`.
 
 Fetched Git dependencies are stored under `.vex/deps/<name>`. Every fetched dependency must contain a `vex.ws` file at its root. Dependency manifests are resolved recursively, and a package name must identify one source and version requirement across the graph.
+
+Vex refuses to use a managed Git checkout with tracked edits or untracked
+files, even if its HEAD matches `vex.lock`. If this happens, preserve your
+changes outside `.vex/deps/<name>`, restore that checkout yourself, and rerun
+`vex fetch`. Vex will not discard local changes automatically.
 
 Every dependency is a library package: its manifest must set `lib = true` and
 its canonical entry is `src/lib.wave`. Wave source imports the package name,

@@ -181,7 +181,20 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
 
 fn set_target(options: &mut VexBuildOptions, target: &str) -> Result<(), String> {
     if target.is_empty() {
-        return Err("`--target` cannot be empty".to_string());
+        return Err("missing value for `--target`: expected a target triple".to_string());
+    }
+    if target.starts_with('-') {
+        return Err(format!(
+            "missing value for `--target`: expected a target triple, found option `{target}`"
+        ));
+    }
+    if !target
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(format!(
+            "invalid value `{target}` for `--target`: expected a target triple containing only ASCII letters, digits, `-`, `_`, or `.`"
+        ));
     }
     if options.target.is_some() {
         return Err("`--target` may only be specified once".to_string());
@@ -329,6 +342,21 @@ mod tests {
         ] {
             parse_vex_build_options(BuildMode::Build, &arguments)
                 .expect_err("invalid target options must be rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_option_tokens_and_invalid_target_syntax() {
+        for mode in [BuildMode::Build, BuildMode::Run, BuildMode::Check] {
+            for token in ["--release", "--dry-run", "--locked", "--offline", "--"] {
+                let err = parse_vex_build_options(mode, &strings(&["--target", token]))
+                    .expect_err("another option cannot be a target value");
+                assert!(err.contains("missing value for `--target`"), "{err}");
+                assert!(err.contains(token), "{err}");
+            }
+            let err = parse_vex_build_options(mode, &strings(&["--target=bad/target"]))
+                .expect_err("target syntax must be checked by Vex");
+            assert!(err.contains("invalid value"), "{err}");
         }
     }
 }

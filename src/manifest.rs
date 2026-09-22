@@ -119,9 +119,9 @@ fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
         _ => return Err("manifest field `lib` must be a bool".to_string()),
     };
 
-    let description = parse_optional_string(data.get("description"))?;
-    let author = parse_optional_string(data.get("author"))?;
-    let license = parse_optional_string(data.get("license"))?;
+    let description = parse_optional_string(data.get("description"), "description")?;
+    let author = parse_optional_string(data.get("author"), "author")?;
+    let license = parse_optional_string(data.get("license"), "license")?;
     let dependencies = parse_dependencies(data.get("dependencies"))?;
 
     Ok(Manifest {
@@ -136,10 +136,10 @@ fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
     })
 }
 
-fn parse_optional_string(value: Option<&WsonValue>) -> Result<Option<String>, String> {
+fn parse_optional_string(value: Option<&WsonValue>, field: &str) -> Result<Option<String>, String> {
     match value {
         Some(WsonValue::String(s)) => Ok(Some(restore_url_separators(s))),
-        Some(_) => Err("manifest optional text field must be a string".to_string()),
+        Some(_) => Err(format!("manifest field `{field}` must be a string")),
         None => Ok(None),
     }
 }

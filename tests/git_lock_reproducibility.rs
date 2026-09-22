@@ -61,6 +61,8 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
 
     let first_fetch = vex(&app, &["fetch"]);
     assert_success(&first_fetch, "initial vex fetch");
+    assert!(app.join(".vex/deps/middle").is_dir());
+    assert!(app.join(".vex/deps/leaf").is_dir());
     let first_stderr = String::from_utf8_lossy(&first_fetch.stderr);
     assert!(first_stderr.contains("Resolving"), "{first_stderr}");
     assert!(first_stderr.contains("Fetching"), "{first_stderr}");
@@ -128,6 +130,65 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
     let mismatched_stderr = String::from_utf8_lossy(&mismatched.stderr);
     assert!(mismatched_stderr.contains("does not match Git dependency `middle`"));
     assert_eq!(read_lock(&app), updated_lock);
+}
+
+#[test]
+fn dirty_managed_checkouts_are_rejected_without_discarding_changes() {
+    let fixture = TestDir::new();
+    let dependency = fixture.path().join("dep");
+    let app = fixture.path().join("app");
+    create_package(&dependency, "dep", &[]);
+    init_git(&dependency);
+    let commit = commit_all(&dependency, "initial dependency");
+    create_package(
+        &app,
+        "app",
+        &[("dep", git_url(&dependency), Some("master"))],
+    );
+
+    assert_success(&vex(&app, &["fetch"]), "initial dependency fetch");
+    let locked = read_lock(&app);
+    let checkout = app.join(".vex/deps/dep");
+    let source = checkout.join("src/lib.wave");
+    let untracked = checkout.join("UNTRACKED.wave");
+    let original = fs::read_to_string(&source).unwrap();
+
+    for (changed_path, content) in [
+        (source.as_path(), "pub fun tampered() {}\n"),
+        (untracked.as_path(), "untracked source\n"),
+    ] {
+        fs::write(changed_path, content).unwrap();
+        for args in [
+            &["fetch"][..],
+            &["fetch", "--locked", "--offline"][..],
+            &["check", "--dry-run", "--locked", "--offline"][..],
+            &["check", "--locked", "--offline"][..],
+            &["tree", "--locked", "--offline"][..],
+        ] {
+            let output = vex(&app, args);
+            assert_failure(&output, &format!("reject dirty checkout for {args:?}"));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("managed Git dependency `dep`"), "{stderr}");
+            assert!(
+                stderr.contains(&checkout.to_string_lossy().to_string()),
+                "{stderr}"
+            );
+            assert!(stderr.contains("preserve those changes"), "{stderr}");
+            assert_eq!(fs::read_to_string(changed_path).unwrap(), content);
+            assert_eq!(read_lock(&app), locked);
+            assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), commit);
+        }
+        if changed_path == source {
+            fs::write(&source, &original).unwrap();
+        } else {
+            fs::remove_file(changed_path).unwrap();
+        }
+    }
+
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "locked dependency after changes are restored",
+    );
 }
 
 #[test]

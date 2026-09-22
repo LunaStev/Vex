@@ -77,6 +77,110 @@ fn invalid_init_and_info_fail_without_mutating_the_directory() {
 }
 
 #[test]
+fn init_scaffolds_public_library_and_ignores_generated_state() {
+    let fixture = TestDir::new();
+    let library = fixture.0.join("library");
+    let app = fixture.0.join("app");
+    fs::create_dir_all(&library).unwrap();
+    fs::create_dir_all(&app).unwrap();
+
+    assert_success(&vex(&library, &["init", "--lib"]), "initialize library");
+    assert_eq!(
+        fs::read_to_string(library.join("src/lib.wave")).unwrap(),
+        "pub fun greet() {\n    println(\"Hello from library\");\n}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(library.join(".gitignore")).unwrap(),
+        "/target/\n/.vex/\n"
+    );
+    assert!(!library.join(".vex/deps").exists());
+
+    assert_success(&vex(&app, &["init"]), "initialize binary");
+    assert_eq!(
+        fs::read_to_string(app.join("src/main.wave")).unwrap(),
+        "fun main() {\n    println(\"Hello World\");\n}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(app.join(".gitignore")).unwrap(),
+        "/target/\n/.vex/\n"
+    );
+    assert!(!app.join(".vex/deps").exists());
+
+    fs::write(
+        app.join("vex.ws"),
+        "{ name = \"app\", version = 0.1.0, dependencies = [{ name = \"library\", path = \"../library\" }] }\n",
+    )
+    .unwrap();
+    assert_success(&vex(&app, &["fetch"]), "resolve generated path library");
+    assert!(!app.join(".vex/deps").exists());
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "reuse path dependency without managed Git state",
+    );
+    assert!(!app.join(".vex/deps").exists());
+}
+
+#[test]
+fn init_preserves_an_existing_gitignore() {
+    let fixture = TestDir::new();
+    for (name, args) in [("binary", &[][..]), ("library", &["--lib"][..])] {
+        let project = fixture.0.join(name);
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".gitignore"), "custom-rule\n").unwrap();
+        assert_success(
+            &vex(&project, &[&["init"][..], args].concat()),
+            "initialize project",
+        );
+        assert_eq!(
+            fs::read_to_string(project.join(".gitignore")).unwrap(),
+            "custom-rule\n"
+        );
+    }
+}
+
+#[test]
+fn manifest_optional_metadata_errors_name_the_field_and_file() {
+    let fixture = TestDir::new();
+    for field in ["description", "author", "license"] {
+        fs::write(
+            fixture.0.join("vex.ws"),
+            format!("{{ name = \"app\", version = 0.1.0, {field} = 123, dependencies = [] }}\n"),
+        )
+        .unwrap();
+        let output = vex(&fixture.0, &["info"]);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("manifest `vex.ws`"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("manifest field `{field}` must be a string")),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn missing_or_malformed_target_fails_before_project_work() {
+    let fixture = TestDir::new();
+    for mode in ["build", "run", "check"] {
+        for args in [
+            &[mode, "--target", "--release", "--dry-run"][..],
+            &[mode, "--target", "--"][..],
+        ] {
+            let output = vex(&fixture.0, args);
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("missing value for `--target`"), "{stderr}");
+            assert!(!stderr.contains("could not find `vex.ws`"), "{stderr}");
+        }
+        let malformed = vex(&fixture.0, &[mode, "--target=bad/target"]);
+        assert_eq!(malformed.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&malformed.stderr).contains("invalid value"));
+    }
+    assert!(!fixture.0.join("target").exists());
+    assert!(!fixture.0.join(".vex").exists());
+}
+
+#[test]
 fn dependencies_must_be_library_packages_with_src_lib_wave() {
     let fixture = TestDir::new();
     let app = fixture.0.join("app");
