@@ -129,6 +129,8 @@ def load_version(manifest_path: Path = ROOT / "Cargo.toml") -> str:
         with manifest_path.open("rb") as manifest_file:
             data = tomllib.load(manifest_file)
         version = data["package"]["version"]
+        if isinstance(version, dict) and version.get("workspace") is True:
+            version = data["workspace"]["package"]["version"]
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
         raise ReleaseError(f"could not read package version from `{manifest_path}`: {error}") from error
     if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
@@ -522,9 +524,20 @@ def verify_release_source(version: str) -> None:
 def run_check_suite() -> None:
     run_command(["cargo", "fmt", "--check"])
     run_python_tests()
-    run_command(["cargo", "test", "--locked"])
-    run_command(["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"])
-    run_command(["cargo", "build", "--locked"])
+    run_command(["cargo", "test", "--workspace", "--locked"])
+    run_command(
+        [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]
+    )
+    run_command(["cargo", "build", "--workspace", "--locked"])
 
 
 def command_check(_: argparse.Namespace) -> None:
@@ -533,7 +546,7 @@ def command_check(_: argparse.Namespace) -> None:
 
 def command_test(_: argparse.Namespace) -> None:
     run_python_tests()
-    run_command(["cargo", "test", "--locked"])
+    run_command(["cargo", "test", "--workspace", "--locked"])
 
 
 def command_build(args: argparse.Namespace) -> None:

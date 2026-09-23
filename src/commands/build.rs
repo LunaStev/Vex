@@ -2,11 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::manifest::Manifest;
-use crate::resolver::{resolve, ResolveOptions, UpdatePolicy};
 use crate::ui;
-use crate::validate::{collect_inputs, validate_build_invocation, BuildValidationRequest};
-use crate::wavec::run_build_with_dry_run;
+use compiler::{
+    collect_inputs, run_build_with_dry_run, validate_build_invocation, BuildValidationRequest,
+};
+use manifest::Manifest;
+use resolver::{resolve, ResolveOptions, UpdatePolicy};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuildMode {
@@ -83,6 +84,7 @@ fn run_build(mode: BuildMode, args: &[String]) -> Result<(), String> {
             locked: options.locked,
             offline: options.offline,
         },
+        ui::status,
     )?;
 
     let mut wavec_args = Vec::new();

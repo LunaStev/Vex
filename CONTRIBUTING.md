@@ -37,9 +37,9 @@ Clone your fork and run the baseline checks:
 
 ```sh
 cargo fmt --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo build --locked
+cargo test --workspace --locked
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo build --workspace --locked
 ```
 
 The same baseline is available through the repository release tool:

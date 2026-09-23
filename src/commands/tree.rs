@@ -5,9 +5,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::lockfile::{LockedPackage, LockedSource};
-use crate::manifest::Manifest;
-use crate::resolver::{resolve, ResolveOptions, UpdatePolicy};
+use crate::ui;
+use lockfile::{LockedPackage, LockedSource};
+use manifest::Manifest;
+use resolver::{resolve, ResolveOptions, UpdatePolicy};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 struct TreeOptions {
@@ -42,6 +43,7 @@ fn run_tree(args: &[String]) -> Result<(), String> {
             locked: options.locked,
             offline: options.offline,
         },
+        ui::status,
     )?;
     print!(
         "{}",

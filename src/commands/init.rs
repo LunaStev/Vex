@@ -3,8 +3,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::lockfile::{write_lockfile, Lockfile};
-use crate::manifest::{render_new_manifest, Manifest, MANIFEST_FILE};
+use lockfile::{write_lockfile, Lockfile};
+use manifest::{render_new_manifest, Manifest, MANIFEST_FILE};
 
 pub fn init(args: &[String]) {
     let is_lib = match parse_options(args) {

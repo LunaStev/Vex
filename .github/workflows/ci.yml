@@ -27,7 +27,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   release-tooling:
     name: Package / Linux amd64
@@ -91,10 +91,10 @@ jobs:
         run: python -m unittest discover -s tests/xpy -v
 
       - name: Run unit and integration tests
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       - name: Build
-        run: cargo build --locked
+        run: cargo build --workspace --locked
 
   linux-riscv64:
     name: Build / Linux riscv64

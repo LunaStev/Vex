@@ -15,9 +15,9 @@
 <!-- List commands and relevant manual checks. -->
 
 - [ ] `cargo fmt --check`
-- [ ] `cargo test --locked`
-- [ ] `cargo clippy --locked --all-targets -- -D warnings`
-- [ ] `cargo build --locked`
+- [ ] `cargo test --workspace --locked`
+- [ ] `cargo clippy --workspace --locked --all-targets -- -D warnings`
+- [ ] `cargo build --workspace --locked`
 
 ## Checklist
 
