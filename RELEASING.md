@@ -26,7 +26,9 @@ checklist before tagging:
 
 1. Review the merged pull requests that GitHub will use to generate the release
    notes.
-2. Confirm the supported platform table and compatible `wavec` contract.
+2. Update the README platform table and SECURITY support policy for the planned
+   release. Confirm published versus experimental targets, installation links,
+   and the compatible `wavec` contract before publication.
 3. Confirm that `Cargo.toml` contains the intended version and that
    `Cargo.lock` is committed.
 4. Audit the locked Rust dependency graph for known vulnerabilities and review
@@ -63,8 +65,9 @@ checks pass, dispatch `.github/workflows/release.yml` in the authoritative
 repository:
 
 ```sh
+release_version='REPLACE_WITH_CARGO_VERSION' # Without the v prefix.
 gh workflow run release.yml --repo wavefnd/Vex --ref master \
-  -f version=0.0.1 \
+  -f version="$release_version" \
   -f draft=true \
   -f prerelease=false
 gh run list --repo wavefnd/Vex --workflow release.yml --limit 1
@@ -78,10 +81,21 @@ mismatch, or when that tag already exists upstream.
 
 The platform matrix builds and smoke-tests that exact commit without a tag.
 After all targets succeed and the complete archive set passes checksum
-verification, the final job runs `gh release create --target <commit>
+verification, the final job verifies the exact commit's latest master CI run:
+quality, package validation, all five native test jobs, and the RISC-V build
+must all succeed. Missing, pending, cancelled, skipped, and failed jobs block
+publication. `tools/release_gate.py` logs the checked run, attempt, and job set;
+keep its required names synchronized with `.github/workflows/ci.yml` and the
+repository's merge rules. The job then rechecks upstream master immediately
+before running `gh release create --target <commit>
 --generate-notes`. GitHub creates the tag in `wavefnd/Vex`, generates notes
 from merged changes, attaches the complete asset set, and applies the selected
 draft and prerelease settings.
+
+Release dispatches share one concurrency group across versions. If master moves
+while packages are built, dispatch again from the new commit; no stale tag is
+created. The final API check is not an atomic GitHub branch-and-tag transaction,
+so maintainers should avoid merging during the publication step.
 
 ## 3. Review the draft release
 
@@ -102,8 +116,8 @@ single `SHA256SUMS`, and creates a GitHub Release.
 Download the draft assets into an empty directory and verify them:
 
 ```sh
-gh release download v0.0.1 --repo wavefnd/Vex --dir vex-v0.0.1
-cd vex-v0.0.1
+gh release download "v$release_version" --repo wavefnd/Vex --dir "vex-v$release_version"
+cd "vex-v$release_version"
 sha256sum --check SHA256SUMS
 ```
 
@@ -119,7 +133,7 @@ checksums, and attached assets in the draft. Only then publish it through the
 GitHub Releases interface or with:
 
 ```sh
-gh release edit v0.0.1 --repo wavefnd/Vex --draft=false
+gh release edit "v$release_version" --repo wavefnd/Vex --draft=false
 ```
 
 After publication, repeat the checksum, version, help, and Wave project smoke

@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use wson_rs::{loads, WsonMap, WsonValue};
@@ -7,6 +8,10 @@ use crate::{LockedPackage, LockedSource, Lockfile, LOCKFILE_NAME, LOCKFILE_VERSI
 const URL_SEPARATOR_SENTINEL: &str = "__VEX_LOCK_URL_SEPARATOR__";
 
 pub(crate) fn parse_lockfile(raw: &str) -> Result<Lockfile, String> {
+    parse_lockfile_inner(raw).map_err(|error| format!("{error}\nhelp: restore a valid `{LOCKFILE_NAME}` from version control; to regenerate intentionally, preserve the invalid file elsewhere and run `vex fetch`"))
+}
+
+fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
     let protected = raw.replace("://", URL_SEPARATOR_SENTINEL);
     let data = loads(&protected).map_err(|e| format!("failed to parse `{LOCKFILE_NAME}`: {e}"))?;
     let version = match data.get("version") {
@@ -29,6 +34,7 @@ pub(crate) fn parse_lockfile(raw: &str) -> Result<Lockfile, String> {
             "unsupported `{LOCKFILE_NAME}` version `{version}`; expected `{LOCKFILE_VERSION}`"
         ));
     }
+    reject_unknown_fields(&data, &["version", "package"], "root")?;
 
     let packages = match data.get("package") {
         Some(WsonValue::Array(items)) => items
@@ -43,15 +49,9 @@ pub(crate) fn parse_lockfile(raw: &str) -> Result<Lockfile, String> {
         None => Vec::new(),
     };
 
-    let normalized = Lockfile { version, packages }.normalized();
-    for pair in normalized.packages.windows(2) {
-        if pair[0].name == pair[1].name {
-            return Err(format!(
-                "`{LOCKFILE_NAME}` contains duplicate package `{}`",
-                pair[0].name
-            ));
-        }
-    }
+    let lockfile = Lockfile { version, packages };
+    validate_graph(&lockfile)?;
+    let normalized = lockfile.normalized();
     Ok(normalized)
 }
 
@@ -64,12 +64,47 @@ fn parse_package(value: &WsonValue) -> Result<LockedPackage, String> {
     let source = required_string(object, "source")?;
     let dependencies = optional_string_array(object, "dependencies")?;
 
+    let fields: &[&str] = match source.as_str() {
+        "path" => &[
+            "name",
+            "version",
+            "source",
+            "path",
+            "resolved",
+            "dependencies",
+        ],
+        "git" => &[
+            "name",
+            "version",
+            "source",
+            "git",
+            "branch",
+            "tag",
+            "rev",
+            "commit",
+            "resolved",
+            "dependencies",
+        ],
+        _ => &[],
+    };
+    if !fields.is_empty() {
+        reject_unknown_fields(object, fields, &format!("package `{name}`"))?;
+    }
+
     let source = match source.as_str() {
         "path" => LockedSource::Path {
             requested: required_string(object, "path")?,
             resolved: PathBuf::from(required_string(object, "resolved")?),
         },
         "git" => {
+            if ["branch", "tag", "rev"]
+                .iter()
+                .filter(|field| object.contains_key(**field))
+                .count()
+                > 1
+            {
+                return Err(format!("lockfile package `{name}` must specify at most one of `branch`, `tag`, or `rev`"));
+            }
             let commit = required_string(object, "commit")?;
             validate_commit(&commit, &name)?;
             LockedSource::Git {
@@ -93,6 +128,102 @@ fn parse_package(value: &WsonValue) -> Result<LockedPackage, String> {
         source,
         dependencies,
     })
+}
+
+fn reject_unknown_fields(object: &WsonMap, allowed: &[&str], context: &str) -> Result<(), String> {
+    for field in object.keys() {
+        if !allowed.contains(&field.as_str()) {
+            return Err(format!(
+                "unknown or source-inapplicable lockfile field `{field}` in {context}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_graph(lockfile: &Lockfile) -> Result<(), String> {
+    let mut packages = BTreeMap::new();
+    for package in &lockfile.packages {
+        if packages.insert(package.name.as_str(), package).is_some() {
+            return Err(format!(
+                "`{LOCKFILE_NAME}` contains duplicate package `{}`",
+                package.name
+            ));
+        }
+    }
+    let mut indegree: BTreeMap<&str, usize> = packages.keys().map(|name| (*name, 0)).collect();
+    for package in &lockfile.packages {
+        let mut seen = BTreeSet::new();
+        for dependency in &package.dependencies {
+            if !seen.insert(dependency) {
+                return Err(format!(
+                    "lockfile graph has duplicate edge: {} -> {dependency}",
+                    package.name
+                ));
+            }
+            if dependency == &package.name {
+                return Err(format!(
+                    "lockfile graph has self-dependency: {} -> {dependency}",
+                    package.name
+                ));
+            }
+            let count = indegree.get_mut(dependency.as_str()).ok_or_else(|| {
+                format!(
+                    "lockfile graph references missing package: {} -> {dependency}",
+                    package.name
+                )
+            })?;
+            *count += 1;
+        }
+    }
+    // Iterative traversal avoids stack overflow for long hand-edited chains.
+    let mut ready: Vec<_> = indegree
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(name, _)| *name)
+        .collect();
+    while let Some(name) = ready.pop() {
+        for dependency in &packages[name].dependencies {
+            let count = indegree
+                .get_mut(dependency.as_str())
+                .expect("edges checked above");
+            *count -= 1;
+            if *count == 0 {
+                ready.push(dependency.as_str());
+            }
+        }
+        indegree.remove(name);
+    }
+    if let Some((&start, _)) = indegree.first_key_value() {
+        // Every remaining node has a remaining predecessor. Follow those
+        // predecessors until one repeats, then reverse to show directed edges.
+        let mut predecessor = BTreeMap::new();
+        for &name in indegree.keys() {
+            for dependency in &packages[name].dependencies {
+                if indegree.contains_key(dependency.as_str()) {
+                    predecessor.insert(dependency.as_str(), name);
+                }
+            }
+        }
+        let mut positions = BTreeMap::new();
+        let mut path = Vec::new();
+        let mut current = start;
+        loop {
+            if let Some(&position) = positions.get(current) {
+                let mut cycle = path[position..].to_vec();
+                cycle.push(current);
+                cycle.reverse();
+                return Err(format!(
+                    "lockfile graph contains a cycle: {}",
+                    cycle.join(" -> ")
+                ));
+            }
+            positions.insert(current, path.len());
+            path.push(current);
+            current = predecessor[current];
+        }
+    }
+    Ok(())
 }
 
 fn validate_commit(commit: &str, package: &str) -> Result<(), String> {
@@ -140,6 +271,25 @@ fn restore_url(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_git_graph_fixture_preserves_object_formats_and_edges() {
+        let raw = include_str!("../../tests/fixtures/lockfile/v2-git-graph.ws");
+        let parsed = parse_lockfile(raw).unwrap();
+        assert_eq!(parsed.packages[0].dependencies, ["beta"]);
+        for (package, length) in parsed.packages.iter().zip([40, 64]) {
+            let LockedSource::Git { commit, .. } = &package.source else {
+                panic!("expected Git fixture");
+            };
+            assert_eq!(commit.len(), length);
+        }
+        let rendered = crate::render::render_lockfile(parsed.clone());
+        assert_eq!(parse_lockfile(&rendered).unwrap(), parsed);
+        assert_eq!(
+            crate::render::render_lockfile(parse_lockfile(&rendered).unwrap()),
+            rendered
+        );
+    }
 
     fn git_lock(commit: &str) -> String {
         format!(

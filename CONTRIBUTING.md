@@ -82,6 +82,24 @@ graphs, exact locked commits, cycles, source/version/name conflicts, and relevan
 When changing selective update behavior, prove that unrelated locked commits and
 remote-tracking refs remain unchanged.
 
+Run the real-compiler package smoke explicitly with a compatible Wave build:
+
+```sh
+cargo build --locked
+python3 tests/wave_compatibility.py --vex target/debug/vex \
+  --wavec-bin /absolute/path/to/wave/bin --reexports
+```
+
+The script removes `VEX_WAVEC` from its child environment and uses that directory
+through `PATH`. It exercises initialization, Hello World, local path/transitive
+Git imports, public re-exports, private-symbol rejection, locked/offline reuse,
+and raw-flag rejection. Git sources are local fixtures, not network dependencies.
+Use `target/debug/vex.exe` on Windows. This smoke is not yet a required CI gate:
+the next Wave release must first be validated and pinned with its checksums.
+The official Wave v0.2.0-pre-beta archive lacks the canonical package import
+contract used by current Vex; do not treat its Hello World success as full
+package compatibility.
+
 Release packages are created with `python3 x.py build` followed by
 `python3 x.py package`. Do not hand-edit `dist/` artifacts. The stricter
 `python3 x.py release` command is reserved for a clean commit carrying the exact

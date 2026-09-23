@@ -7,28 +7,32 @@ Vex is designed to sit above `wavec` in the same way Cargo sits above `rustc`: V
 ## Requirements
 
 - `wavec` compatible with the `build --dry-run --error-format=json` schema v1 contract
+  and canonical package imports through Vex's `--dep` mappings
 - `git` when using Git dependencies
 - Rust toolchain only when building Vex from source
 - Python 3.11 or newer when using the release tooling
 
 Vex runs `wavec` from `PATH` by default. Set `VEX_WAVEC=/path/to/wavec` to use a specific compiler binary.
-Vex v0.0.1 is tested with `wavec 0.2.0-pre-beta`; support for schema v1 is the
-authoritative compatibility requirement. Vex reports a schema mismatch before
-the real build and suggests selecting another compiler with `VEX_WAVEC`.
+The original Vex v0.0.1 smoke used `wavec 0.2.0-pre-beta`. Current Vex source
+also relies on the newer canonical package import contract: the official
+wavec v0.2.0-pre-beta archive runs Hello World but cannot compile those package
+imports. Schema v1 alone is therefore not a complete compatibility guarantee.
+Vex reports schema mismatches before the real build; package-language compatibility
+is exercised separately by `tests/wave_compatibility.py` against a selected compiler.
 
 ## Platform validation
 
-The v0.0.1 release candidate targets below are validated on every pull request.
-“Candidate” means the platform is intended to receive a release archive after
-the release workflow also passes package and clean-environment smoke tests.
+The targets below have published v0.0.1 release archives. Pull-request CI
+validates the current source on these platforms; this is separate from the
+package and clean-environment smoke tests required for each release.
 
 | Platform | Rust target | CI validation | v0.0.1 status |
 | --- | --- | --- | --- |
-| Linux amd64 | `x86_64-unknown-linux-gnu` | native tests, build, package smoke | Candidate |
-| Linux arm64 | `aarch64-unknown-linux-gnu` | native tests and build | Candidate |
-| Windows x64 | `x86_64-pc-windows-msvc` | native tests and build | Candidate |
-| macOS Intel | `x86_64-apple-darwin` | native tests and build | Candidate |
-| macOS Apple Silicon | `aarch64-apple-darwin` | native tests and build | Candidate |
+| Linux amd64 | `x86_64-unknown-linux-gnu` | native tests, build, package smoke | Released |
+| Linux arm64 | `aarch64-unknown-linux-gnu` | native tests and build | Released |
+| Windows x64 | `x86_64-pc-windows-msvc` | native tests and build | Released |
+| macOS Intel | `x86_64-apple-darwin` | native tests and build | Released |
+| macOS Apple Silicon | `aarch64-apple-darwin` | native tests and build | Released |
 | Linux RISC-V | `riscv64gc-unknown-linux-gnu` | cross-build and QEMU version smoke | Experimental |
 
 Windows release artifacts use the MSVC target. A Windows GNU artifact is not
@@ -253,6 +257,24 @@ VEX_WAVEC=/opt/wave/bin/wavec vex build --dry-run
 ```
 
 ## Development and release tooling
+
+### Lockfile compatibility
+
+Vex writes lockfile schema v2. Valid v2 files retain their exact source commits
+and graph edges; unknown fields, source-inapplicable fields, conflicting Git
+selectors, duplicate edges, missing nodes, and cycles are errors. Invalid and
+unknown future versions are never silently rewritten, including in offline mode.
+
+Legacy v1 files are treated as unresolved graphs. `vex fetch` can replace them
+with v2 after successful resolution; `--offline` allows this only when all needed
+sources can be resolved locally. `--locked` rejects v1 instead of migrating it.
+Lockfile replacement is atomic: a failed write or replacement preserves the old
+file. This does not yet make concurrent commands or checkout changes transactional.
+
+Semantic format changes require an explicit schema-version change, compatibility
+fixtures, and documented migration behavior in the release PR and user documentation.
+Fixtures live in `tests/fixtures/lockfile/`; Git integration tests cover locked
+commit reuse and path fixtures cover relocation without absolute checkout paths.
 
 Vex is a Cargo workspace. The root package contains only the CLI surface;
 manifest parsing, lockfile storage, dependency resolution, compiler invocation,

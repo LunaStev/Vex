@@ -22,7 +22,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 try:
     import tomllib
@@ -314,14 +314,27 @@ def create_zip_archive(stage: Path, archive: Path, epoch: int) -> None:
             write_zip_entry(zipped, f"{stage.name}/{entry.name}", entry.read_bytes(), epoch, mode)
 
 
-def create_archive(stage: Path, target: Target, epoch: int) -> Path:
+def create_archive(
+    stage: Path, target: Target, epoch: int, *, verify: Callable[[Path], None] | None = None
+) -> Path:
     extension = ".zip" if target.archive == "zip" else ".tar.gz"
     archive = stage.parent / f"{stage.name}{extension}"
-    archive.unlink(missing_ok=True)
-    if target.archive == "zip":
-        create_zip_archive(stage, archive, epoch)
-    else:
-        create_tar_archive(stage, archive, epoch)
+    # Complete and verify a unique sibling before replacing the published file.
+    # Close the temporary handle before archive writers open it (Windows).
+    with tempfile.NamedTemporaryFile(
+        dir=archive.parent, prefix=f".{archive.name}-", suffix=".tmp", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+    try:
+        if target.archive == "zip":
+            create_zip_archive(stage, temporary, epoch)
+        else:
+            create_tar_archive(stage, temporary, epoch)
+        if verify is not None:
+            verify(temporary)
+        temporary.replace(archive)
+    finally:
+        temporary.unlink(missing_ok=True)
     return archive
 
 
@@ -383,7 +396,8 @@ def smoke_binary(binary_data: bytes, target: Target, version: str, host: str) ->
 
         version_result = run_command([*prefix, "--version"], capture=True)
         version_output = strip_ansi(version_result.stdout).strip()
-        if not re.search(rf"\bvex\s+{re.escape(version)}\b", version_output):
+        reported = re.fullmatch(r"vex\s+(\S+)", version_output)
+        if reported is None or reported.group(1) != version:
             raise ReleaseError(
                 f"packaged binary reported unexpected version `{version_output}`; expected `{version}`"
             )
@@ -473,14 +487,11 @@ def package_targets(targets: Iterable[Target], version: str, host: str) -> list[
     for target in targets:
         status("Packaging", target.triple)
         stage = prepare_stage(version, target)
-        archive: Path | None = None
         try:
-            archive = create_archive(stage, target, epoch)
-            verify_archive(archive, stage, target, version, host)
-        except Exception:
-            if archive is not None:
-                archive.unlink(missing_ok=True)
-            raise
+            archive = create_archive(
+                stage, target, epoch,
+                verify=lambda candidate: verify_archive(candidate, stage, target, version, host),
+            )
         finally:
             shutil.rmtree(stage, ignore_errors=True)
         archives.append(archive)

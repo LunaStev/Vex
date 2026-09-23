@@ -249,10 +249,87 @@ class ReleaseToolTests(unittest.TestCase):
         self.assertNotIn("git tag", workflow)
         self.assertNotIn("git push", workflow)
         self.assertIn("ref: ${{ needs.validate.outputs.commit }}", workflow)
+        self.assertIn("group: manual-release\n", workflow)
+        self.assertIn('python tools/release_gate.py --commit "$RELEASE_COMMIT"\n          gh "${args[@]}"', workflow)
         self.assertLess(
             workflow.index("sha256sum --check SHA256SUMS"),
             workflow.index("--generate-notes"),
         )
+
+    def test_smoke_requires_the_complete_expected_version(self) -> None:
+        target = release_tool.SUPPORTED_TARGETS["x86_64-unknown-linux-gnu"]
+        cases = [
+            ("0.0.1", "vex 0.0.1", True),
+            ("0.0.1", " \x1b[32mvex 0.0.1\x1b[0m\n", True),
+            ("0.0.1", "vex 0.0.2", False),
+            ("0.0.1", "vex 0.0.1-pre-beta", False),
+            ("0.0.1", "vex 0.0.1+other", False),
+            ("0.0.1-rc.1", "vex 0.0.1-rc.1-extra", False),
+            ("0.0.1-rc.1", "vex 0.0.1-rc.1", True),
+        ]
+        for expected, reported, valid in cases:
+            with self.subTest(reported=reported), mock.patch.object(
+                release_tool, "run_command", side_effect=[
+                    subprocess.CompletedProcess([], 0, reported),
+                    subprocess.CompletedProcess([], 0, "Vex - Wave package manager"),
+                ]
+            ) as run:
+                if valid:
+                    self.assertTrue(release_tool.smoke_binary(b"unused", target, expected, target.triple))
+                    self.assertEqual(run.call_count, 2)
+                else:
+                    with self.assertRaisesRegex(release_tool.ReleaseError, "unexpected version"):
+                        release_tool.smoke_binary(b"unused", target, expected, target.triple)
+                    self.assertEqual(run.call_count, 1)
+
+    def test_archive_replacement_preserves_previous_on_any_failure(self) -> None:
+        for triple in ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]:
+            target = release_tool.SUPPORTED_TARGETS[triple]
+            writer = "create_zip_archive" if target.archive == "zip" else "create_tar_archive"
+            extension = ".zip" if target.archive == "zip" else ".tar.gz"
+            for existing in [False, True]:
+                for failure in ["write", "verify", "replace", None]:
+                    with self.subTest(triple=triple, existing=existing, failure=failure), tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        stage = root / "package"
+                        stage.mkdir()
+                        (stage / target.executable_name).write_bytes(b"binary")
+                        archive = root / f"package{extension}"
+                        if existing:
+                            archive.write_bytes(b"previous")
+
+                        def write(stage, candidate, epoch):
+                            candidate.write_bytes(b"replacement")
+                            if failure == "write":
+                                raise OSError("injected write failure")
+
+                        def verify(candidate):
+                            self.assertEqual(candidate.read_bytes(), b"replacement")
+                            self.assertNotEqual(candidate, archive)
+                            if existing:
+                                self.assertEqual(archive.read_bytes(), b"previous")
+                            else:
+                                self.assertFalse(archive.exists())
+                            if failure == "verify":
+                                raise release_tool.ReleaseError("injected verification failure")
+
+                        original_replace = Path.replace
+                        def replace(source, destination):
+                            if failure == "replace":
+                                raise OSError("injected replacement failure")
+                            return original_replace(source, destination)
+
+                        with mock.patch.object(release_tool, writer, side_effect=write), mock.patch.object(Path, "replace", replace):
+                            if failure:
+                                with self.assertRaises((OSError, release_tool.ReleaseError)):
+                                    release_tool.create_archive(stage, target, 0, verify=verify)
+                                self.assertEqual(archive.exists(), existing)
+                                if existing:
+                                    self.assertEqual(archive.read_bytes(), b"previous")
+                            else:
+                                self.assertEqual(release_tool.create_archive(stage, target, 0, verify=verify), archive)
+                                self.assertEqual(archive.read_bytes(), b"replacement")
+                        self.assertEqual(set(root.iterdir()), {stage, archive} if archive.exists() else {stage})
 
     @staticmethod
     def make_package_inputs(root: Path, target: object, binary: bytes) -> None:

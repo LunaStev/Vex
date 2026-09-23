@@ -360,6 +360,7 @@ impl<'a> Resolver<'a> {
         } else if let Some(rev) = rev {
             format!("{rev}^{{commit}}")
         } else {
+            git::refresh_default_branch(destination)?;
             "refs/remotes/origin/HEAD^{commit}".to_string()
         };
         let commit = git::stdout(
