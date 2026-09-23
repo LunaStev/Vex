@@ -169,10 +169,7 @@ fn dirty_managed_checkouts_are_rejected_without_discarding_changes() {
             assert_failure(&output, &format!("reject dirty checkout for {args:?}"));
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains("managed Git dependency `dep`"), "{stderr}");
-            assert!(
-                stderr.contains(&checkout.to_string_lossy().to_string()),
-                "{stderr}"
-            );
+            assert_reported_dirty_checkout_path(&stderr, "dep", &checkout);
             assert!(stderr.contains("preserve those changes"), "{stderr}");
             assert_eq!(fs::read_to_string(changed_path).unwrap(), content);
             assert_eq!(read_lock(&app), locked);
@@ -353,6 +350,26 @@ fn vex(path: &Path, args: &[&str]) -> Output {
 
 fn read_lock(app: &Path) -> String {
     fs::read_to_string(app.join("vex.lock")).expect("vex.lock must exist")
+}
+
+fn assert_reported_dirty_checkout_path(stderr: &str, package: &str, expected: &Path) {
+    let prefix = format!("managed Git dependency `{package}` at `");
+    let reported = stderr
+        .split_once(&prefix)
+        .and_then(|(_, rest)| rest.split_once("` has local changes"))
+        .map(|(path, _)| path)
+        .unwrap_or_else(|| panic!("dirty-checkout path was not reported:\n{stderr}"));
+    let reported = fs::canonicalize(reported).unwrap_or_else(|error| {
+        panic!("failed to canonicalize reported path `{reported}`: {error}")
+    });
+    let expected = fs::canonicalize(expected).unwrap_or_else(|error| {
+        panic!(
+            "failed to canonicalize expected path `{}`: {error}",
+            expected.display()
+        )
+    });
+
+    assert_eq!(reported, expected, "{stderr}");
 }
 
 fn assert_success(output: &Output, action: &str) {
