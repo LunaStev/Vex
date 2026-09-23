@@ -69,19 +69,30 @@ mod tests {
     fn lockfile_round_trip_preserves_git_commits_and_edges() {
         let lockfile = Lockfile {
             version: LOCKFILE_VERSION,
-            packages: vec![LockedPackage {
-                name: "math".to_string(),
-                version: "1.2.3".to_string(),
-                source: LockedSource::Git {
-                    url: "https://example.com/math.git".to_string(),
-                    branch: Some("main".to_string()),
-                    tag: None,
-                    rev: None,
-                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-                    resolved: PathBuf::from(".vex/deps/math"),
+            packages: vec![
+                LockedPackage {
+                    name: "core".to_string(),
+                    version: "1.0.0".to_string(),
+                    source: LockedSource::Path {
+                        requested: "../core".to_string(),
+                        resolved: PathBuf::from("../core"),
+                    },
+                    dependencies: vec![],
                 },
-                dependencies: vec!["core".to_string()],
-            }],
+                LockedPackage {
+                    name: "math".to_string(),
+                    version: "1.2.3".to_string(),
+                    source: LockedSource::Git {
+                        url: "https://example.com/math.git".to_string(),
+                        branch: Some("main".to_string()),
+                        tag: None,
+                        rev: None,
+                        commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                        resolved: PathBuf::from(".vex/deps/math"),
+                    },
+                    dependencies: vec!["core".to_string()],
+                },
+            ],
         };
 
         let rendered = crate::render::render_lockfile(lockfile.clone());

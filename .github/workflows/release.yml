@@ -26,7 +26,7 @@ env:
   RELEASE_VERSION: ${{ inputs.version }}
 
 concurrency:
-  group: manual-release-${{ inputs.version }}
+  group: manual-release
   cancel-in-progress: false
 
 jobs:
@@ -178,6 +178,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Check out release commit
         uses: actions/checkout@v7
@@ -240,4 +241,5 @@ jobs:
             args+=(--prerelease)
           fi
 
+          python tools/release_gate.py --commit "$RELEASE_COMMIT"
           gh "${args[@]}"

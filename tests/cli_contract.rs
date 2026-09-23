@@ -301,6 +301,37 @@ fn missing_or_malformed_target_fails_before_project_work() {
 }
 
 #[test]
+fn invalid_projects_never_report_dependency_or_compiler_work_started() {
+    for manifest in [None, Some("{ name = false }")] {
+        let fixture = TestDir::new();
+        if let Some(manifest) = manifest {
+            fs::write(fixture.0.join("vex.ws"), manifest).unwrap();
+        }
+        for command in ["update", "fetch", "build", "run", "check", "tree"] {
+            let output = vex(&fixture.0, &[command]);
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("vex.ws"), "{stderr}");
+            for status in [
+                "Updating",
+                "Resolving",
+                "Cloning",
+                "Fetching",
+                "Locking",
+                "Compiling",
+                "Checking",
+                "Running",
+            ] {
+                assert!(!stderr.contains(status), "{command}: {stderr}");
+            }
+            assert!(!fixture.0.join("target").exists());
+            assert!(!fixture.0.join(".vex").exists());
+            assert!(!fixture.0.join("vex.lock").exists());
+        }
+    }
+}
+
+#[test]
 fn dependencies_must_be_library_packages_with_src_lib_wave() {
     let fixture = TestDir::new();
     let app = fixture.0.join("app");

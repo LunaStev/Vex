@@ -323,6 +323,286 @@ fn git_lock_accepts_uppercase_and_mixed_case_commit_ids_without_recheckout() {
     assert_failure(&invalid_fetch, "locked fetch with invalid commit hash");
 }
 
+#[test]
+fn managed_checkouts_detach_even_when_head_already_matches() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    let app = fixture.path().join("app");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    let commit = commit_all(&dep, "initial");
+    create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+    assert_success(&vex(&app, &["fetch"]), "initial fetch");
+    let checkout = app.join(".vex/deps/dep");
+    assert_eq!(
+        git_stdout(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD"
+    );
+    let locked = read_lock(&app);
+    for args in [
+        &["fetch"][..],
+        &["fetch", "--locked", "--offline"],
+        &["update", "dep"],
+    ] {
+        git_stdout(&checkout, &["checkout", "master"]);
+        assert_success(&vex(&app, args), "detach checkout");
+        assert_eq!(
+            git_stdout(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD"
+        );
+        assert_eq!(git_stdout(&checkout, &["rev-parse", "HEAD"]), commit);
+        assert_eq!(read_lock(&app), locked);
+    }
+}
+
+#[test]
+fn selector_free_updates_follow_changed_remote_default_branches() {
+    for update in [&["update"][..], &["update", "dep"]] {
+        let fixture = TestDir::new();
+        let dep = fixture.path().join("dep");
+        let app = fixture.path().join("app");
+        create_package(&dep, "dep", &[]);
+        init_git(&dep);
+        let old = commit_all(&dep, "initial");
+        create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+        assert_success(&vex(&app, &["fetch"]), "initial default branch fetch");
+        let locked = read_lock(&app);
+        git_stdout(&dep, &["checkout", "-b", "next"]);
+        fs::write(dep.join("revision"), "next").unwrap();
+        let new = commit_all(&dep, "new default branch");
+        for args in [&["fetch"][..], &["fetch", "--locked", "--offline"]] {
+            assert_success(&vex(&app, args), "reuse old default branch lock");
+            assert_eq!(read_lock(&app), locked);
+            assert_eq!(
+                git_stdout(&app.join(".vex/deps/dep"), &["rev-parse", "HEAD"]),
+                old
+            );
+        }
+        assert_success(&vex(&app, update), "refresh default branch");
+        assert!(read_lock(&app).contains(&new));
+        assert_eq!(
+            git_stdout(
+                &app.join(".vex/deps/dep"),
+                &["symbolic-ref", "refs/remotes/origin/HEAD"]
+            ),
+            "refs/remotes/origin/next"
+        );
+    }
+}
+
+#[test]
+fn tag_and_exact_revision_selectors_remain_pinned_on_update() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    let pinned = commit_all(&dep, "tagged revision");
+    git_stdout(&dep, &["tag", "v1"]);
+    git_stdout(
+        &dep,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "tag",
+            "-a",
+            "v1-annotated",
+            "-m",
+            "annotated",
+        ],
+    );
+    for (i, selector) in [
+        "tag = \"v1\"".to_string(),
+        "tag = \"v1-annotated\"".to_string(),
+        format!("rev = \"{pinned}\""),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let app = fixture.path().join(format!("app_{i}"));
+        create_package(&app, "app", &[("dep", git_url(&dep), Some("master"))]);
+        let manifest = fs::read_to_string(app.join("vex.ws"))
+            .unwrap()
+            .replace("branch = \"master\"", selector);
+        fs::write(app.join("vex.ws"), manifest).unwrap();
+        assert_success(&vex(&app, &["fetch"]), "fetch explicit selector");
+        let locked = read_lock(&app);
+        assert!(locked.contains(&pinned));
+        fs::write(dep.join("revision"), format!("revision {i}")).unwrap();
+        let moved = commit_all(&dep, "advance branch");
+        for args in [
+            &["fetch", "--locked", "--offline"][..],
+            &["update", "dep"],
+            &["update"],
+        ] {
+            assert_success(&vex(&app, args), "reuse explicit selector");
+            assert_eq!(read_lock(&app), locked);
+            assert_eq!(
+                git_stdout(&app.join(".vex/deps/dep"), &["rev-parse", "HEAD"]),
+                pinned
+            );
+            assert!(!read_lock(&app).contains(&moved));
+        }
+    }
+}
+
+#[test]
+fn dependency_git_ignores_inherited_repository_context() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    let other = fixture.path().join("unrelated");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    let dep_commit = commit_all(&dep, "dependency");
+    create_package(&other, "other", &[]);
+    init_git(&other);
+    let other_commit = commit_all(&other, "unrelated");
+    fs::write(other.join("src/lib.wave"), "user changes\n").unwrap();
+    let index = fs::read(other.join(".git/index")).unwrap();
+    let overrides = [
+        ("GIT_DIR", other.join(".git")),
+        ("GIT_WORK_TREE", other.clone()),
+        ("GIT_COMMON_DIR", other.join(".git")),
+        ("GIT_INDEX_FILE", other.join(".git/index")),
+        ("GIT_OBJECT_DIRECTORY", other.join(".git/objects")),
+        (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            other.join(".git/objects"),
+        ),
+        ("GIT_NAMESPACE", PathBuf::from("unrelated")),
+    ];
+    // Test each variable independently and then all together. Overrides belong
+    // only to child processes; no global environment races with other tests.
+    for case in 0..=overrides.len() {
+        let app = fixture.path().join(format!("app_{case}"));
+        create_package(&app, "app", &[("dep", git_url(&dep), Some("master"))]);
+        for args in [
+            &["fetch"][..],
+            &["update", "dep"],
+            &["fetch", "--locked", "--offline"],
+            &["check", "--dry-run", "--locked", "--offline"],
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_vex"));
+            command.args(args).current_dir(&app).env(
+                "VEX_WAVEC",
+                fixture.path().join("deliberately-missing-wavec"),
+            );
+            for (i, (name, value)) in overrides.iter().enumerate() {
+                if case == i || case == overrides.len() {
+                    command.env(name, value);
+                }
+            }
+            let output = command.output().unwrap();
+            if args[0] == "check" {
+                // Reaching the compiler proves read-only checkout verification
+                // passed; this fixture does not depend on an installed wavec.
+                assert_failure(&output, "missing fixture compiler");
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    stderr.contains("failed to execute")
+                        && stderr.contains("deliberately-missing-wavec"),
+                    "{stderr}"
+                );
+            } else {
+                assert_success(&output, &format!("environment case {case}: {args:?}"));
+            }
+            assert_eq!(
+                git_stdout(&app.join(".vex/deps/dep"), &["rev-parse", "HEAD"]),
+                dep_commit
+            );
+            assert_eq!(git_stdout(&other, &["rev-parse", "HEAD"]), other_commit);
+            assert_eq!(fs::read(other.join(".git/index")).unwrap(), index);
+            assert_eq!(
+                fs::read_to_string(other.join("src/lib.wave")).unwrap(),
+                "user changes\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn url_rewrites_preserve_declared_identity_and_reject_invalid_origins() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    let app = fixture.path().join("app");
+    let home = fixture.path().join("isolated-home");
+    fs::create_dir_all(&home).unwrap();
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    commit_all(&dep, "initial");
+    let declared = "https://vex-fixture.invalid/dep.git";
+    create_package(&app, "app", &[("dep", declared.to_string(), None)]);
+    let config = home.join("gitconfig");
+    let rewrite = format!("url.{}.insteadOf", git_url(&dep));
+    assert_success(
+        &Command::new("git")
+            .args(["config", "--file"])
+            .arg(&config)
+            .args([&rewrite, declared])
+            .output()
+            .unwrap(),
+        "isolated URL rewrite",
+    );
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_vex"))
+            .args(args)
+            .current_dir(&app)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env(
+                "VEX_WAVEC",
+                fixture.path().join("deliberately-missing-wavec"),
+            )
+            .output()
+            .unwrap()
+    };
+    for args in [
+        &["fetch"][..],
+        &["fetch"],
+        &["fetch", "--locked", "--offline"],
+        &["update", "dep"],
+    ] {
+        assert_success(&run(args), "URL-rewritten dependency");
+    }
+    let output = run(&["check", "--dry-run", "--locked", "--offline"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed to execute"));
+    let locked = read_lock(&app);
+    assert!(locked.contains(declared));
+    assert!(!locked.contains(&git_url(&dep)));
+    let checkout = app.join(".vex/deps/dep");
+    for invalid in ["changed", "multiple", "missing"] {
+        git_stdout(
+            &checkout,
+            &["config", "--replace-all", "remote.origin.url", declared],
+        );
+        match invalid {
+            "changed" => {
+                git_stdout(&checkout, &["config", "remote.origin.url", "file:///wrong"]);
+            }
+            "multiple" => {
+                git_stdout(
+                    &checkout,
+                    &["config", "--add", "remote.origin.url", declared],
+                );
+            }
+            _ => {
+                git_stdout(&checkout, &["config", "--unset-all", "remote.origin.url"]);
+            }
+        }
+        let output = run(&["fetch", "--locked", "--offline"]);
+        assert_failure(&output, invalid);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("expected exactly one origin") && stderr.contains("help:"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&app), locked);
+    }
+}
+
 fn create_package(path: &Path, name: &str, dependencies: &[(&str, String, Option<&str>)]) {
     fs::create_dir_all(path.join("src")).expect("package source directory must be created");
     fs::write(path.join("src/lib.wave"), "pub fun package_marker() {}\n")

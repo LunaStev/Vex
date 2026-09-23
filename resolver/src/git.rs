@@ -32,8 +32,8 @@ pub(crate) fn ensure_repository(
     status("Cloning", format!("{name} ({url})"));
     let destination = git_cli_path(destination);
     run(
-        Command::new("git")
-            .args(["-c", "protocol.ext.allow=never", "clone", "--", url])
+        command()
+            .args(["clone", "--", url])
             .arg(destination.as_ref()),
         "clone Git dependency",
     )
@@ -63,15 +63,39 @@ pub(crate) fn require_local_repository(
 }
 
 fn verify_origin(destination: &Path, expected: &str) -> Result<(), String> {
-    let actual = stdout(
-        command_in(destination).args(["remote", "get-url", "origin"]),
-        "read Git dependency origin",
-    )?;
-    if actual == expected {
+    // Read declarations, not `remote get-url`, which expands user insteadOf rules.
+    // NUL delimiters preserve URLs containing whitespace and detect multiple values.
+    let output = command_in(destination)
+        .args(["config", "--null", "--get-all", "remote.origin.url"])
+        .output()
+        .map_err(|error| format!("failed to read Git dependency origin: {error}"))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(git_error(
+            "read Git dependency origin",
+            output.status,
+            &output.stdout,
+            &output.stderr,
+        ));
+    }
+    let values: Vec<_> = output
+        .stdout
+        .strip_suffix(&[0])
+        .map(|bytes| bytes.split(|byte| *byte == 0).collect())
+        .unwrap_or_default();
+    if values.len() == 1 && values[0] == expected.as_bytes() {
         return Ok(());
     }
+    let actual = if values.is_empty() {
+        "<missing>".to_string()
+    } else {
+        values
+            .iter()
+            .map(|value| String::from_utf8_lossy(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     Err(format!(
-        "managed checkout `{}` has origin `{actual}`, expected `{expected}`\nhelp: remove that checkout and run `vex fetch` again",
+        "managed checkout `{}` has origin `{actual}`, expected exactly one origin `{expected}`\nhelp: restore remote.origin.url to the declared source, then run `vex fetch`",
         destination.display()
     ))
 }
@@ -80,6 +104,13 @@ pub(crate) fn fetch(destination: &Path) -> Result<(), String> {
     run(
         command_in(destination).args(["fetch", "origin", "--tags", "--prune"]),
         "fetch Git dependency",
+    )
+}
+
+pub(crate) fn refresh_default_branch(destination: &Path) -> Result<(), String> {
+    run(
+        command_in(destination).args(["remote", "set-head", "origin", "--auto"]),
+        "refresh Git dependency default branch",
     )
 }
 
@@ -126,9 +157,23 @@ pub(crate) fn checkout_commit(destination: &Path, name: &str, commit: &str) -> R
         "read Git dependency HEAD",
     )?;
     if current == commit {
-        return Ok(());
+        let head = command_in(destination)
+            .args(["symbolic-ref", "--quiet", "HEAD"])
+            .output()
+            .map_err(|error| format!("failed to inspect Git dependency HEAD: {error}"))?;
+        match head.status.code() {
+            Some(1) => return Ok(()), // Already detached at the exact locked commit.
+            Some(0) => {}             // Matching branch tip still needs detaching.
+            _ => {
+                return Err(git_error(
+                    "inspect Git dependency HEAD",
+                    head.status,
+                    &head.stdout,
+                    &head.stderr,
+                ))
+            }
+        }
     }
-
     run(
         command_in(destination).args(["checkout", "--detach", commit]),
         "checkout locked Git dependency commit",
@@ -156,10 +201,33 @@ pub(crate) fn reject_dirty_checkout(destination: &Path, name: &str) -> Result<()
 }
 
 pub(crate) fn command_in(destination: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = command();
+    command.arg("-C").arg(git_cli_path(destination).as_ref());
     command
-        .args(["-c", "protocol.ext.allow=never", "-C"])
-        .arg(git_cli_path(destination).as_ref());
+}
+
+fn command() -> Command {
+    let mut command = Command::new("git");
+    command.args(["-c", "protocol.ext.allow=never"]);
+    // A hook or parent tool can export repository-local context that overrides -C.
+    // Keep authentication, SSH, proxies, HOME, and user config (including URL
+    // rewrites) intact; remove only repository selection/object/index context.
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_REPLACE_REF_BASE",
+    ] {
+        command.env_remove(variable);
+    }
     command
 }
 
