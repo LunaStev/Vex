@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use crate::manifest::Manifest;
-use crate::resolver::{resolve, ResolveOptions, UpdatePolicy};
 use crate::ui;
+use manifest::Manifest;
+use resolver::{resolve, ResolveOptions, UpdatePolicy};
 
 #[derive(Debug, Default)]
 struct DependencyOptions {
@@ -12,7 +12,11 @@ struct DependencyOptions {
     packages: BTreeSet<String>,
 }
 
-pub fn fetch(update: bool, args: &[String]) {
+pub fn fetch(args: &[String]) {
+    dependency_command(false, args);
+}
+
+pub(super) fn dependency_command(update: bool, args: &[String]) {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!(
             "usage: vex {}",
@@ -77,6 +81,7 @@ fn run_fetch(update: bool, args: &[String]) -> Result<(), String> {
             locked: options.locked,
             offline: options.offline,
         },
+        ui::status,
     )?;
     ui::status(
         "Finished",

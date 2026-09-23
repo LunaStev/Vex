@@ -159,6 +159,126 @@ fn manifest_optional_metadata_errors_name_the_field_and_file() {
 }
 
 #[test]
+fn strict_manifest_errors_precede_project_mutation() {
+    let fixture = TestDir::new();
+    let cases = [
+        (
+            "{ name = \"app\", dependecies = [] }\n",
+            "unknown field `dependecies`",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", path = \"../dep\", pth = \"../dep\" }] }\n",
+            "dependency `dep` contains unknown field `pth`",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", path = \"../dep\", branch = \"main\" }] }\n",
+            "field `branch` applies only to Git dependencies",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", path = \" \" }] }\n",
+            "field `path` must not be empty or whitespace-only",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", git = \"\" }] }\n",
+            "field `git` must not be empty or whitespace-only",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", git = \"https://example.invalid/dep.git\", branch = \" \" }] }\n",
+            "field `branch` must not be empty or whitespace-only",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", git = \"https://example.invalid/dep.git\", tag = \" \" }] }\n",
+            "field `tag` must not be empty or whitespace-only",
+        ),
+        (
+            "{ name = \"app\", dependencies = [{ name = \"dep\", git = \"https://example.invalid/dep.git\", rev = \" \" }] }\n",
+            "field `rev` must not be empty or whitespace-only",
+        ),
+    ];
+
+    for (manifest, expected) in cases {
+        fs::write(fixture.0.join("vex.ws"), manifest).unwrap();
+        let output = vex(&fixture.0, &["fetch"]);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("manifest `vex.ws`"), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!fixture.0.join(".vex").exists());
+        assert!(!fixture.0.join("vex.lock").exists());
+        assert!(!fixture.0.join("target").exists());
+    }
+}
+
+#[test]
+fn duplicate_dependencies_are_invalid_for_every_project_command() {
+    let fixture = TestDir::new();
+    fs::write(
+        fixture.0.join("vex.ws"),
+        "{ name = \"app\", dependencies = [{ name = \"alpha\", path = \"../alpha\" }, { name = \"beta\", path = \"../beta\" }, { name = \"alpha\", path = \"../other-alpha\" }] }\n",
+    )
+    .unwrap();
+
+    for command in ["info", "tree", "fetch", "update", "build", "run", "check"] {
+        let output = vex(&fixture.0, &[command]);
+        assert_eq!(output.status.code(), Some(1), "{command}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("manifest `vex.ws`"), "{stderr}");
+        assert!(
+            stderr.contains("dependency `alpha` is declared more than once"),
+            "{stderr}"
+        );
+        assert!(!fixture.0.join(".vex").exists());
+        assert!(!fixture.0.join("vex.lock").exists());
+        assert!(!fixture.0.join("target").exists());
+    }
+}
+
+#[test]
+fn transitive_path_dependency_cannot_reuse_the_root_name() {
+    let fixture = TestDir::new();
+    let app = fixture.0.join("app");
+    let middle = fixture.0.join("middle");
+    let shadow = fixture.0.join("shadow-app");
+    for package in [&app, &middle, &shadow] {
+        fs::create_dir_all(package.join("src")).unwrap();
+    }
+    fs::write(
+        app.join("vex.ws"),
+        "{ name = \"app\", dependencies = [{ name = \"middle\", path = \"../middle\" }] }\n",
+    )
+    .unwrap();
+    fs::write(
+        middle.join("vex.ws"),
+        "{ name = \"middle\", lib = true, dependencies = [{ name = \"app\", path = \"../shadow-app\" }] }\n",
+    )
+    .unwrap();
+    fs::write(
+        shadow.join("vex.ws"),
+        "{ name = \"app\", lib = true, dependencies = [] }\n",
+    )
+    .unwrap();
+    fs::write(middle.join("src/lib.wave"), "pub fun middle() {}\n").unwrap();
+    fs::write(shadow.join("src/lib.wave"), "pub fun shadow() {}\n").unwrap();
+
+    let output = vex(&app, &["fetch"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reuses root package name `app`"),
+        "{stderr}"
+    );
+    let root_manifest = fs::canonicalize(app.join("vex.ws")).unwrap();
+    assert!(
+        stderr.contains(&root_manifest.display().to_string()),
+        "{stderr}"
+    );
+    let shadow = fs::canonicalize(shadow).unwrap();
+    assert!(stderr.contains(&shadow.display().to_string()), "{stderr}");
+    assert!(!app.join("vex.lock").exists());
+    assert!(!app.join(".vex").exists());
+}
+
+#[test]
 fn missing_or_malformed_target_fails_before_project_work() {
     let fixture = TestDir::new();
     for mode in ["build", "run", "check"] {

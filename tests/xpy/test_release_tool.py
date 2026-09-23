@@ -22,7 +22,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 with (ROOT / "Cargo.toml").open("rb") as manifest_file:
-    EXPECTED_VERSION = tomllib.load(manifest_file)["package"]["version"]
+    root_manifest = tomllib.load(manifest_file)
+    EXPECTED_VERSION = root_manifest["workspace"]["package"]["version"]
 MODULE_NAME = "vex_release_tool"
 SPEC = importlib.util.spec_from_file_location(MODULE_NAME, ROOT / "x.py")
 if SPEC is None or SPEC.loader is None:  # pragma: no cover - import setup failure
@@ -44,6 +45,16 @@ class ReleaseToolTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(release_tool.load_version(manifest), "1.2.3-rc.1+build.7")
+
+    def test_load_version_accepts_workspace_inheritance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "Cargo.toml"
+            manifest.write_text(
+                '[package]\nname = "fixture"\nversion.workspace = true\n'
+                '[workspace]\n[workspace.package]\nversion = "2.0.0"\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(release_tool.load_version(manifest), "2.0.0")
 
     def test_select_targets_deduplicates_without_reordering(self) -> None:
         selected = release_tool.select_targets(

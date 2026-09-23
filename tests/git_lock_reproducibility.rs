@@ -189,6 +189,61 @@ fn dirty_managed_checkouts_are_rejected_without_discarding_changes() {
 }
 
 #[test]
+fn locked_offline_resolution_rejects_a_transitive_root_name_conflict() {
+    let fixture = TestDir::new();
+    let conflicting = fixture.path().join("conflicting");
+    let middle = fixture.path().join("middle");
+    let app = fixture.path().join("app");
+
+    create_package(&conflicting, "app", &[]);
+    init_git(&conflicting);
+    let conflicting_commit = commit_all(&conflicting, "initial conflicting package");
+
+    create_package(
+        &middle,
+        "middle",
+        &[("app", git_url(&conflicting), Some("master"))],
+    );
+    init_git(&middle);
+    let middle_commit = commit_all(&middle, "initial middle package");
+
+    create_package(
+        &app,
+        "root",
+        &[("middle", git_url(&middle), Some("master"))],
+    );
+    assert_success(&vex(&app, &["fetch"]), "initial dependency fetch");
+    let locked = read_lock(&app);
+    assert!(locked.contains(&format!("commit = \"{conflicting_commit}\"")));
+    assert!(locked.contains(&format!("commit = \"{middle_commit}\"")));
+
+    let conflicting_checkout = app.join(".vex/deps/app");
+    fs::remove_dir_all(&conflicting_checkout).expect("conflicting checkout must be removed");
+    create_package(&app, "app", &[("middle", git_url(&middle), Some("master"))]);
+
+    let output = vex(&app, &["fetch", "--locked", "--offline"]);
+    assert_failure(&output, "locked offline root-name conflict");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reuses root package name `app`"),
+        "{stderr}"
+    );
+    let root_manifest = fs::canonicalize(app.join("vex.ws")).unwrap();
+    assert!(
+        stderr.contains(&root_manifest.display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&git_url(&conflicting)), "{stderr}");
+    assert!(!stderr.contains("Fetching"), "{stderr}");
+    assert_eq!(read_lock(&app), locked);
+    assert!(!conflicting_checkout.exists());
+    assert_eq!(
+        git_stdout(&app.join(".vex/deps/middle"), &["rev-parse", "HEAD"]),
+        middle_commit
+    );
+}
+
+#[test]
 fn git_lock_accepts_uppercase_and_mixed_case_commit_ids_without_recheckout() {
     let fixture = TestDir::new();
     let leaf = fixture.path().join("leaf");

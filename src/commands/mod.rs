@@ -1,8 +1,9 @@
 pub mod build;
 pub mod check;
-pub mod deps;
+pub mod fetch;
 pub mod info;
 pub mod init;
 pub mod run;
 pub mod setup;
 pub mod tree;
+pub mod update;

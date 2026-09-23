@@ -122,6 +122,12 @@ Vex uses `vex.ws` as the project manifest. The extension is `.ws`.
 }
 ```
 
+The Vex v0.0.1 root manifest object accepts only `name`, `version`, `lib`, `description`,
+`author`, `license`, and `dependencies`. Dependency objects accept only `name`,
+`version`, `path`, `git`, `branch`, `tag`, and `rev`. Unknown fields are errors,
+including names intended as private or experimental extensions; adding a field
+requires an explicit Vex schema change.
+
 ## Dependencies
 
 Vex currently uses a Git-first package model and does not require a central package registry. Local path dependencies are also supported.
@@ -150,7 +156,7 @@ Git dependency:
 }
 ```
 
-A dependency entry must use exactly one of `path` or `git`. Git dependencies may specify at most one of `branch`, `tag`, or `rev`.
+A dependency entry must use exactly one of `path` or `git`. Git dependencies may specify at most one of `branch`, `tag`, or `rev`; those selectors are invalid on path dependencies. Source and selector values cannot be empty or whitespace-only. Dependency names must be unique within a manifest and cannot reuse the root package name.
 
 Fetched Git dependencies are stored under `.vex/deps/<name>`. Every fetched dependency must contain a `vex.ws` file at its root. Dependency manifests are resolved recursively, and a package name must identify one source and version requirement across the graph.
 
@@ -247,6 +253,20 @@ VEX_WAVEC=/opt/wave/bin/wavec vex build --dry-run
 ```
 
 ## Development and release tooling
+
+Vex is a Cargo workspace. The root package contains only the CLI surface;
+manifest parsing, lockfile storage, dependency resolution, compiler invocation,
+and toolchain installation live in focused library crates:
+
+```text
+Vex/
+├── src/          # CLI parsing, commands, and terminal UI
+├── manifest/     # vex.ws parsing and rendering
+├── lockfile/     # vex.lock parsing, rendering, and storage
+├── resolver/     # dependency graph, Git, and path resolution
+├── compiler/     # wavec invocation, plans, and argument validation
+└── toolchain/    # platform-specific wavec installation
+```
 
 The repository-level `x.py` script is the supported entry point for release
 builds and packages. It reads the version from `Cargo.toml`, always builds with

@@ -1,4 +1,4 @@
-use crate::manifest::{DependencySource, Manifest};
+use manifest::{DependencySource, Manifest};
 
 pub fn info(args: &[String]) {
     if matches!(args, [help] if help == "-h" || help == "--help") {

@@ -68,6 +68,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cbe37c69085a508a1bbaa07ad57ec34a2d9d277da94a830b031fb08cac16ba1"
 
 [[package]]
+name = "compiler"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -126,10 +133,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
+name = "lockfile"
+version = "0.0.1"
+dependencies = [
+ "wson_rs",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "manifest"
+version = "0.0.1"
+dependencies = [
+ "wson_rs",
+]
 
 [[package]]
 name = "memchr"
@@ -198,6 +219,14 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "resolver"
+version = "0.0.1"
+dependencies = [
+ "lockfile",
+ "manifest",
+]
 
 [[package]]
 name = "rustversion"
@@ -276,6 +305,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toolchain"
+version = "0.0.1"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -286,8 +319,11 @@ name = "vex"
 version = "0.0.1"
 dependencies = [
  "colorex",
- "serde_json",
- "wson_rs",
+ "compiler",
+ "lockfile",
+ "manifest",
+ "resolver",
+ "toolchain",
 ]
 
 [[package]]
