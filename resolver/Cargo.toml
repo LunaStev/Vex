@@ -2,6 +2,7 @@
 name = "resolver"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -9,3 +10,5 @@ publish = false
 [dependencies]
 manifest.workspace = true
 lockfile.workspace = true
+state.workspace = true
+serde_json.workspace = true

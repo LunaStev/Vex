@@ -1,5 +1,5 @@
 [package]
-name = "lockfile"
+name = "wson"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,4 +8,5 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-wson.workspace = true
+wson_rs.workspace = true
+serde_json.workspace = true

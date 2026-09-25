@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use wson_rs::{loads, WsonMap, WsonValue};
+use wson::{loads, WsonMap, WsonValue};
 
 use crate::{Dependency, DependencySource, Manifest};
 
-const URL_SEPARATOR_SENTINEL: &str = "__VEX_WSON_URL_SEPARATOR__";
 const ROOT_FIELDS: &[&str] = &[
+    "format",
     "name",
     "version",
     "lib",
@@ -18,9 +18,13 @@ const ROOT_FIELDS: &[&str] = &[
 const DEPENDENCY_FIELDS: &[&str] = &["name", "version", "path", "git", "branch", "tag", "rev"];
 
 pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
-    let protected_raw = protect_url_separators(raw);
-    let data = loads(&protected_raw).map_err(|e| format!("failed to parse manifest: {e}"))?;
+    let data = loads(raw, "format", 2).map_err(|e| format!("failed to parse manifest: {e}"))?;
     reject_unknown_fields(&data, ROOT_FIELDS, "manifest")?;
+    if !matches!(data.get("format"), None | Some(WsonValue::Int(1 | 2))) {
+        return Err(
+            "unsupported manifest format; expected 1 (legacy) or 2 (escaped strings)".into(),
+        );
+    }
 
     let name = match data.get("name") {
         Some(WsonValue::String(value)) => restore_url_separators(value),
@@ -230,12 +234,8 @@ fn optional_string(value: Option<&WsonValue>, field: &str) -> Result<Option<Stri
     }
 }
 
-fn protect_url_separators(raw: &str) -> String {
-    raw.replace("://", URL_SEPARATOR_SENTINEL)
-}
-
 fn restore_url_separators(value: &str) -> String {
-    value.replace(URL_SEPARATOR_SENTINEL, "://")
+    value.to_owned()
 }
 
 fn parse_version_string(value: &WsonValue) -> Option<String> {

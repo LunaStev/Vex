@@ -39,13 +39,13 @@ PACKAGE_DOCUMENTS = (
     "LICENSE",
     "NOTICE",
     "COPYRIGHT",
+    "THIRD_PARTY_LICENSES",
 )
 CHECKSUM_FILE = "SHA256SUMS"
 MINIMUM_ZIP_EPOCH = 315532800  # 1980-01-01T00:00:00Z
 MAXIMUM_ZIP_EPOCH = 4354819198  # 2107-12-31T23:59:58Z
-VERSION_PATTERN = re.compile(
-    r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$"
-)
+from tools.release_version import VERSION_PATTERN, valid_version
+
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -93,6 +93,10 @@ def run_command(
     env: dict[str, str] | None = None,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if str(command[0]) in {"cargo", "rustc"}:
+        env = dict(os.environ if env is None else env)
+        with (ROOT / "rust-toolchain.toml").open("rb") as toolchain_file:
+            env["RUSTUP_TOOLCHAIN"] = tomllib.load(toolchain_file)["toolchain"]["channel"]
     status("Running", command_text(command))
     try:
         return subprocess.run(
@@ -133,7 +137,7 @@ def load_version(manifest_path: Path = ROOT / "Cargo.toml") -> str:
             version = data["workspace"]["package"]["version"]
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as error:
         raise ReleaseError(f"could not read package version from `{manifest_path}`: {error}") from error
-    if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
+    if not isinstance(version, str) or not valid_version(version):
         raise ReleaseError(f"Cargo.toml contains unsupported package version `{version}`")
     return version
 

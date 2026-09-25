@@ -1,6 +1,7 @@
 pub fn render_new_manifest(project_name: &str, author: &str, is_lib: bool) -> String {
     format!(
         r#"{{
+    format = 2,
     name = "{name}",
     version = 0.1.0,
     lib = {is_lib},
@@ -16,5 +17,6 @@ pub fn render_new_manifest(project_name: &str, author: &str, is_lib: bool) -> St
 }
 
 fn escape_wson_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let quoted = wson::quote(value);
+    quoted[1..quoted.len() - 1].to_owned()
 }

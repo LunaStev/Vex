@@ -26,10 +26,15 @@ boundaries or a persistent file format.
 
 You need:
 
-- a stable Rust toolchain with `rustfmt` and `clippy`
+- Rust 1.96.0 with its `rustfmt` and `clippy` components
 - Python 3.11 or newer for `x.py` release tooling
 - Git for dependency integration tests
 - a compatible `wavec` in `PATH` for end-to-end build and run tests
+
+`rust-toolchain.toml`, workspace `rust-version`, CI, and release builds select
+1.96.0. This is the first supported toolchain and MSRV; changing it requires a
+reviewed change to all four and native platform validation. `x.py` also selects
+the pinned toolchain when a caller has set a different `RUSTUP_TOOLCHAIN`.
 
 Set `VEX_WAVEC=/path/to/wavec` when testing a specific compiler binary.
 
@@ -75,7 +80,8 @@ Add tests at the same level as the behavior being changed:
   runner exists; cross-build-only targets must be documented as experimental
 
 Git integration tests must use local fixture repositories and must not require
-external network access. Dependency changes should cover direct and transitive
+external network access. Process-coordination tests use loopback TCP barriers
+with deadlines, so a sandbox must permit local sockets. Dependency changes should cover direct and transitive
 graphs, exact locked commits, cycles, source/version/name conflicts, and relevant
 `--locked` and `--offline` behavior.
 
@@ -166,3 +172,14 @@ Security reports follow [SECURITY.md](SECURITY.md).
 
 Unless a file says otherwise, contributions are licensed under the
 [Mozilla Public License 2.0](LICENSE).
+
+
+## Master merge rules
+
+Master requires a pull request, an up-to-date base, and all eight checks:
+Quality / Linux amd64; Package / Linux amd64; Test / Linux amd64;
+Test / Linux arm64; Test / Windows x64; Test / macOS x64; Test / macOS arm64;
+Build / Linux riscv64. Force pushes and deletion are prohibited. The ruleset has
+no bypass actors; administrators must also satisfy the PR and check requirements.
+Release gating
+remains a separate check of the exact master SHA and latest CI attempt.

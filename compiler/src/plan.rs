@@ -1,13 +1,9 @@
 use serde_json::Value;
 
-pub(crate) fn validate_dry_run_json_output(stdout: &[u8], stderr: &[u8]) -> Result<(), String> {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let candidate = extract_json_object(&stdout)
-        .or_else(|| extract_json_object(&stderr))
-        .ok_or_else(|| "wavec dry-run did not return a JSON object plan".to_string())?;
-    let value: Value = serde_json::from_str(candidate)
-        .map_err(|error| format!("invalid wavec dry-run JSON plan: {error}"))?;
+pub(crate) fn validate_dry_run_json_output(stdout: &[u8], _stderr: &[u8]) -> Result<Value, String> {
+    let text = std::str::from_utf8(stdout).map_err(|_| "wavec plan stdout is not UTF-8")?;
+    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("expected one JSON plan document on stdout: {e}"))?;
     let object = value
         .as_object()
         .ok_or_else(|| "wavec dry-run plan must be a JSON object".to_string())?;
@@ -31,7 +27,44 @@ pub(crate) fn validate_dry_run_json_output(stdout: &[u8], stderr: &[u8]) -> Resu
     require_string_or_null(object, "forced_input_type")?;
     require_link_or_null(object.get("link"))?;
     require_execute_or_null(object.get("execute"))?;
-    Ok(())
+    for key in ["emit_kinds", "emit_jobs"] {
+        string_array(&value[key], key)?;
+    }
+    for (key, fields) in [
+        ("inputs", &["path", "kind"][..]),
+        ("compile", &["input", "kind", "output", "command"][..]),
+    ] {
+        for (i, item) in value[key].as_array().unwrap().iter().enumerate() {
+            let item = item
+                .as_object()
+                .ok_or_else(|| format!("{key}[{i}] must be an object"))?;
+            for field in fields {
+                require_string(item, field).map_err(|e| format!("{key}[{i}].{field}: {e}"))?;
+            }
+        }
+    }
+    if !value["link"].is_null() {
+        string_array(&value["link"]["inputs"], "link.inputs")?;
+        string_array(&value["link"]["args"], "link.args")?;
+    }
+    if !value["execute"].is_null() {
+        string_array(&value["execute"]["args"], "execute.args")?;
+    }
+    Ok(value)
+}
+
+pub(crate) fn string_array(value: &Value, path: &str) -> Result<Vec<String>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{path} must be an array"))?
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{path}[{i}] must be a string"))
+        })
+        .collect()
 }
 
 fn require_string(object: &serde_json::Map<String, Value>, key: &str) -> Result<(), String> {
@@ -94,12 +127,6 @@ fn require_execute_or_null(value: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
-fn extract_json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (end > start).then(|| &text[start..=end])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,9 +163,11 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_json_can_be_extracted_from_noisy_output() {
+    fn dry_run_json_rejects_noisy_or_multiple_documents() {
         let output = format!("debug line\n{}\n", valid_plan());
         validate_dry_run_json_output(output.as_bytes(), b"")
-            .expect("JSON object should be extracted from mixed output");
+            .expect_err("stdout must contain exactly one plan");
+        validate_dry_run_json_output(format!("{}{}", valid_plan(), valid_plan()).as_bytes(), b"")
+            .expect_err("multiple plans are ambiguous");
     }
 }

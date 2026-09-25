@@ -46,6 +46,12 @@ fn run_init(is_lib: bool) -> Result<(), String> {
         return Err(format!("`{MANIFEST_FILE}` already exists."));
     }
 
+    let _guard = state::Guard::acquire(false, crate::ui::status)?;
+    resolver::recover_project(&_guard, false)?;
+    if manifest_path.exists() {
+        return Err(format!("`{MANIFEST_FILE}` already exists."));
+    }
+
     let project_name = env::current_dir()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))

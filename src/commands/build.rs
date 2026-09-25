@@ -72,10 +72,6 @@ fn run_build(mode: BuildMode, args: &[String]) -> Result<(), String> {
         global_args: &global_args,
     })?;
 
-    if !options.dry_run {
-        fs::create_dir_all("target").map_err(|e| format!("failed to create target/: {e}"))?;
-    }
-
     let resolution = resolve(
         &manifest,
         ResolveOptions {
@@ -87,6 +83,17 @@ fn run_build(mode: BuildMode, args: &[String]) -> Result<(), String> {
         ui::status,
     )?;
 
+    let generation = if mode == BuildMode::Run {
+        let path = if options.dry_run {
+            PathBuf::from("target/.vex-run/planned")
+        } else {
+            compiler::create_run_generation()?
+        };
+        build_args.push(format!("--target-dir={}", path.display()));
+        Some(path)
+    } else {
+        None
+    };
     let mut wavec_args = Vec::new();
     wavec_args.extend(resolution.dependency_args());
     wavec_args.extend(global_args);
@@ -109,12 +116,14 @@ fn run_build(mode: BuildMode, args: &[String]) -> Result<(), String> {
             },
             &package,
         );
-        if mode == BuildMode::Run {
-            ui::status("Running", &manifest.name);
-        }
     }
 
-    run_build_with_dry_run(&wavec_args, options.dry_run)?;
+    let execution = run_build_with_dry_run(&wavec_args, options.dry_run, generation.as_deref())?;
+    drop(resolution);
+    if let Some(execution) = execution {
+        ui::status("Running", &manifest.name);
+        execution.execute()?;
+    }
 
     if !options.dry_run {
         ui::status(

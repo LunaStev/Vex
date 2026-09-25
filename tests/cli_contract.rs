@@ -275,7 +275,8 @@ fn transitive_path_dependency_cannot_reuse_the_root_name() {
     let shadow = fs::canonicalize(shadow).unwrap();
     assert!(stderr.contains(&shadow.display().to_string()), "{stderr}");
     assert!(!app.join("vex.lock").exists());
-    assert!(!app.join(".vex").exists());
+    assert!(app.join(".vex/state.lock").is_file());
+    assert!(!app.join(".vex/deps").exists());
 }
 
 #[test]

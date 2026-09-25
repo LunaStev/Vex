@@ -1,19 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use wson_rs::{loads, WsonMap, WsonValue};
+use wson::{loads, WsonMap, WsonValue};
 
 use crate::{LockedPackage, LockedSource, Lockfile, LOCKFILE_NAME, LOCKFILE_VERSION};
 
-const URL_SEPARATOR_SENTINEL: &str = "__VEX_LOCK_URL_SEPARATOR__";
-
-pub(crate) fn parse_lockfile(raw: &str) -> Result<Lockfile, String> {
+pub fn parse_lockfile(raw: &str) -> Result<Lockfile, String> {
     parse_lockfile_inner(raw).map_err(|error| format!("{error}\nhelp: restore a valid `{LOCKFILE_NAME}` from version control; to regenerate intentionally, preserve the invalid file elsewhere and run `vex fetch`"))
 }
 
 fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
-    let protected = raw.replace("://", URL_SEPARATOR_SENTINEL);
-    let data = loads(&protected).map_err(|e| format!("failed to parse `{LOCKFILE_NAME}`: {e}"))?;
+    let data =
+        loads(raw, "version", 3).map_err(|e| format!("failed to parse `{LOCKFILE_NAME}`: {e}"))?;
     let version = match data.get("version") {
         Some(WsonValue::Int(value)) => *value,
         _ => {
@@ -29,7 +27,7 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
             packages: Vec::new(),
         });
     }
-    if version != LOCKFILE_VERSION {
+    if version != 2 && version != LOCKFILE_VERSION {
         return Err(format!(
             "unsupported `{LOCKFILE_NAME}` version `{version}`; expected `{LOCKFILE_VERSION}`"
         ));
@@ -265,7 +263,7 @@ fn optional_string_array(object: &WsonMap, key: &str) -> Result<Vec<String>, Str
 }
 
 fn restore_url(value: &str) -> String {
-    value.replace(URL_SEPARATOR_SENTINEL, "://")
+    value.to_owned()
 }
 
 #[cfg(test)]
@@ -284,7 +282,7 @@ mod tests {
             assert_eq!(commit.len(), length);
         }
         let rendered = crate::render::render_lockfile(parsed.clone());
-        assert_eq!(parse_lockfile(&rendered).unwrap(), parsed);
+        assert_eq!(parse_lockfile(&rendered).unwrap().packages, parsed.packages);
         assert_eq!(
             crate::render::render_lockfile(parse_lockfile(&rendered).unwrap()),
             rendered

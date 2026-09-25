@@ -15,5 +15,9 @@ release archives do not grant additional rights to `wavec`, Wave packages, or
 third-party dependencies; those works remain subject to their respective
 licenses.
 
+Third-party dependency license texts and attributions are provided in
+THIRD_PARTY_LICENSES, including notices for build-time and platform-specific
+dependencies from the locked source graph.
+
 Source code for this release is available from:
 https://github.com/wavefnd/Vex

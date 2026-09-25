@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const V1: &str = include_str!("fixtures/lockfile/v1.ws");
 const V2: &str = include_str!("fixtures/lockfile/v2-path.ws");
+const V3: &str = include_str!("fixtures/lockfile/v3-path.ws");
 const FUTURE: &str = include_str!("fixtures/lockfile/future.ws");
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -57,42 +58,63 @@ impl Drop for Fixture {
 
 #[test]
 fn historical_lockfiles_have_explicit_migration_and_reuse_behavior() {
-    let fixture = Fixture::new();
-    let mut migrated = None;
-    for flags in [
-        &[][..],
-        &["--offline"],
-        &["--locked"],
-        &["--locked", "--offline"],
-    ] {
-        let output = fixture.run(V1, flags);
-        if flags.contains(&"--locked") {
-            assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("version 1 cannot be used"));
-            assert_eq!(fixture.lock(), V1);
-        } else {
+    // Exercise both input encodings on every runner, independently of Git's
+    // core.autocrlf setting. Reused/locked files still require byte equality.
+    for newline in ["\n", "\r\n"] {
+        let [v1, v2, v3, future] =
+            [V1, V2, V3, FUTURE].map(|text| text.replace("\r\n", "\n").replace('\n', newline));
+        let fixture = Fixture::new();
+        let mut migrated = None;
+        for flags in [
+            &[][..],
+            &["--offline"],
+            &["--locked"],
+            &["--locked", "--offline"],
+        ] {
+            let output = fixture.run(&v1, flags);
+            if flags.contains(&"--locked") {
+                assert!(!output.status.success());
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("version 1 cannot be used")
+                );
+                assert_eq!(fixture.lock(), v1);
+            } else {
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if let Some(previous) = &migrated {
+                    assert_eq!(&fixture.lock(), previous);
+                }
+                migrated = Some(fixture.lock());
+            }
+            let output = fixture.run(&v2, flags);
             assert!(
                 output.status.success(),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            if let Some(previous) = &migrated {
-                assert_eq!(&fixture.lock(), previous);
+            if flags.contains(&"--locked") {
+                assert_eq!(fixture.lock(), v2);
+            } else {
+                // A migration may change line endings and use native path
+                // separators. Its version and graph must match the v3 fixture.
+                assert_eq!(
+                    lockfile::decode(&fixture.lock()).unwrap(),
+                    lockfile::decode(&v3).unwrap()
+                );
+                assert!(!fixture.lock().contains('\r'));
             }
-            migrated = Some(fixture.lock());
+            let output = fixture.run(&v3, flags);
+            assert!(output.status.success());
+            assert_eq!(fixture.lock(), v3);
+            let output = fixture.run(&future, flags);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("unsupported `vex.lock` version `999`"));
+            assert_eq!(fixture.lock(), future);
         }
-        let output = fixture.run(V2, flags);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(fixture.lock(), V2);
-        let output = fixture.run(FUTURE, flags);
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr)
-            .contains("unsupported `vex.lock` version `999`"));
-        assert_eq!(fixture.lock(), FUTURE);
     }
 }
 
@@ -150,8 +172,9 @@ fn invalid_v2_locks_fail_before_mutating_dependency_state() {
             assert!(stderr.contains(expected), "{stderr}");
             assert!(stderr.contains("help:"), "{stderr}");
             assert_eq!(fixture.lock(), input);
-            assert!(!fixture.0.join("app/.vex").exists());
-            assert_eq!(fs::read_dir(fixture.0.join("app")).unwrap().count(), 2);
+            assert!(fixture.0.join("app/.vex/state.lock").is_file());
+            assert_eq!(fs::read_dir(fixture.0.join("app/.vex")).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(fixture.0.join("app")).unwrap().count(), 3);
         }
     }
 }
