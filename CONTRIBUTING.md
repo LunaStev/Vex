@@ -179,7 +179,7 @@ Unless a file says otherwise, contributions are licensed under the
 Master requires a pull request, an up-to-date base, and all eight checks:
 Quality / Linux amd64; Package / Linux amd64; Test / Linux amd64;
 Test / Linux arm64; Test / Windows x64; Test / macOS x64; Test / macOS arm64;
-Build / Linux riscv64. Force pushes and deletion are prohibited. Administrator
-emergency bypass is restricted to pull requests, retaining a reviewable PR record.
-Record the emergency reason and follow-up validation in that PR. Release gating
+Build / Linux riscv64. Force pushes and deletion are prohibited. The ruleset has
+no bypass actors; administrators must also satisfy the PR and check requirements.
+Release gating
 remains a separate check of the exact master SHA and latest CI attempt.

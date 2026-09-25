@@ -95,12 +95,12 @@ created by local build/package verification.
 Archives include the license texts and notices from the complete locked Cargo
 graph in `THIRD_PARTY_LICENSES`, including build-time and platform-specific
 packages. Regenerate and review these when Cargo.lock changes; CI checks their
-lockfile fingerprint. Known-vulnerability scans are time-specific release
+lockfile fingerprint with CRLF normalized to LF. Known-vulnerability scans are time-specific release
 evidence and must be repeated for the eventual release commit.
 
 Master requires PRs, all eight current CI checks and an up-to-date base. Force
-pushes and branch deletion are prohibited. Administrator emergency bypass retains
-a PR record; maintainers must record its reason and follow-up validation there.
+pushes and branch deletion are prohibited. There are no bypass actors;
+administrators must also meet the PR and check requirements.
 
 Before release: run the new concurrency/recovery tests natively on Linux,
 Windows and macOS, verify clean-environment packages, complete the dependency

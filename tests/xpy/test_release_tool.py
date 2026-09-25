@@ -32,15 +32,44 @@ release_tool = importlib.util.module_from_spec(SPEC)
 sys.modules[MODULE_NAME] = release_tool
 SPEC.loader.exec_module(release_tool)
 
+from tools import dependency_notices
+
 
 class ReleaseToolTests(unittest.TestCase):
     def test_dependency_notices_match_locked_sources(self) -> None:
         notices = (ROOT / "THIRD_PARTY_LICENSES").read_text(encoding="utf-8")
         lock_bytes = (ROOT / "Cargo.lock").read_bytes()
-        self.assertIn(f"Cargo.lock SHA-256: {hashlib.sha256(lock_bytes).hexdigest()}", notices)
+        recorded = next((line for line in notices.splitlines() if line.startswith("Cargo.lock SHA-256")), None)
+        self.assertEqual(recorded, f"Cargo.lock SHA-256 (LF): {dependency_notices.lockfile_fingerprint(lock_bytes)}")
         for package in tomllib.loads(lock_bytes.decode())["package"]:
             if "source" in package:
-                self.assertIn(f"\n{package['name']} {package['version']}\n", notices)
+                name = f"{package['name']} {package['version']}"
+                self.assertTrue(f"\n{name}\n" in notices, f"missing dependency notice: {name}")
+
+    def test_notices_are_stable_across_checkout_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crate = root / "crate"
+            crate.mkdir()
+            (crate / "LICENSE").write_bytes(b"Fixture license\n")
+            lock = (
+                b'version = 4\n[[package]]\nname = "fixture"\nversion = "1.0.0"\n'
+                b'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                b'checksum = "original"\n'
+            )
+            package = tomllib.loads(lock.decode())["package"][0]
+            metadata = {"packages": [{
+                **package, "manifest_path": str(crate / "Cargo.toml"),
+                "license": "MIT", "license_file": None,
+            }]}
+            with mock.patch.object(dependency_notices, "ROOT", root):
+                (root / "Cargo.lock").write_bytes(lock)
+                original = dependency_notices.generate(metadata)
+                (root / "Cargo.lock").write_bytes(lock.replace(b"\n", b"\r\n"))
+                (crate / "LICENSE").write_bytes(b"Fixture license\r\n")
+                self.assertEqual(dependency_notices.generate(metadata), original)
+                (root / "Cargo.lock").write_bytes(lock.replace(b'"original"', b'"changed"'))
+                self.assertNotEqual(dependency_notices.generate(metadata), original)
 
     def test_supported_rust_toolchain_is_consistent(self) -> None:
         with (ROOT / "rust-toolchain.toml").open("rb") as source:

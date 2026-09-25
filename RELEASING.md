@@ -57,7 +57,8 @@ checklist before tagging:
    python3 tools/dependency_notices.py /tmp/vex-cargo-metadata.json
    ```
 
-   CI checks that THIRD_PARTY_LICENSES matches Cargo.lock. Review newly added
+   CI checks that THIRD_PARTY_LICENSES matches Cargo.lock, normalizing CRLF to LF
+   for its fingerprint so Windows checkouts produce the same result. Review newly added
    license terms and notices; generating this file does not replace that review.
 
 5. Run the complete local validation suite:
