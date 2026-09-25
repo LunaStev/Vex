@@ -1,6 +1,6 @@
 use crate::{LockedPackage, LockedSource, Lockfile, LOCKFILE_VERSION};
 
-pub(crate) fn render_lockfile(lockfile: Lockfile) -> String {
+pub fn render_lockfile(lockfile: Lockfile) -> String {
     let blocks = lockfile
         .packages
         .iter()
@@ -67,5 +67,6 @@ fn render_field(key: &str, value: &str) -> String {
 }
 
 fn escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let quoted = wson::quote(value);
+    quoted[1..quoted.len() - 1].to_owned()
 }

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+#[cfg(test)]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -73,15 +74,7 @@ pub(crate) fn validate_managed_checkout_path(destination: &Path) -> Result<(), S
 }
 
 fn reject_symbolic_link(path: &Path, label: &str) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
-            "{label} `{}` must not be a symbolic link\nhelp: replace the link with a real directory before running Vex",
-            path.display()
-        )),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("failed to inspect `{}`: {error}", path.display())),
-    }
+    state::reject_link(path).map_err(|e| format!("{label}: {e}"))
 }
 
 pub(crate) fn git_cli_path(path: &Path) -> Cow<'_, Path> {

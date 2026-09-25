@@ -8,6 +8,146 @@ use support::git_url;
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn insufficient_local_graph_requires_fetch_without_implicit_discovery() {
+    let fixture = TestDir::new();
+    let alpha = fixture.path().join("alpha");
+    let beta = fixture.path().join("beta");
+    let app = fixture.path().join("app");
+    for (path, name) in [(&alpha, "alpha"), (&beta, "beta")] {
+        create_package(path, name, &[]);
+        init_git(path);
+        commit_all(path, "initial");
+    }
+    create_package(&app, "app", &[("alpha", git_url(&alpha), None)]);
+    let output = vex(&app, &["update", "typo"]);
+    assert_failure(&output, "selection without local graph");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("run `vex fetch` first"), "{stderr}");
+    assert!(
+        !stderr.contains("Cloning") && !stderr.contains("Fetching"),
+        "{stderr}"
+    );
+    assert!(!app.join(".vex/deps").exists());
+    assert!(!app.join("vex.lock").exists());
+
+    assert_success(&vex(&app, &["fetch"]), "prepare graph");
+    let lock = fs::read(app.join("vex.lock")).unwrap();
+    let head = git_stdout(&app.join(".vex/deps/alpha"), &["rev-parse", "HEAD"]);
+    create_package(
+        &app,
+        "app",
+        &[
+            ("alpha", git_url(&alpha), None),
+            ("beta", git_url(&beta), None),
+        ],
+    );
+    for name in ["typo", "alpha", "beta"] {
+        let output = vex(&app, &["update", name]);
+        assert_failure(&output, "changed graph needs preparation");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("run `vex fetch` first"), "{stderr}");
+        assert!(
+            !stderr.contains("Cloning") && !stderr.contains("Fetching"),
+            "{stderr}"
+        );
+        assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
+        assert_eq!(
+            git_stdout(&app.join(".vex/deps/alpha"), &["rev-parse", "HEAD"]),
+            head
+        );
+        assert!(!app.join(".vex/deps/beta").exists());
+    }
+}
+
+#[test]
+fn later_invalid_dependency_preserves_every_live_checkout_and_lock() {
+    let fixture = TestDir::new();
+    let alpha = fixture.path().join("alpha");
+    let beta = fixture.path().join("beta");
+    let app = fixture.path().join("app");
+    for (path, name) in [(&alpha, "alpha"), (&beta, "beta")] {
+        create_package(path, name, &[]);
+        init_git(path);
+        commit_all(path, "initial");
+    }
+    create_package(
+        &app,
+        "app",
+        &[
+            ("alpha", git_url(&alpha), None),
+            ("beta", git_url(&beta), None),
+        ],
+    );
+    assert_success(&vex(&app, &["fetch"]), "prepare graph");
+    let lock = fs::read(app.join("vex.lock")).unwrap();
+    let heads: Vec<_> = ["alpha", "beta"]
+        .iter()
+        .map(|n| git_stdout(&app.join(".vex/deps").join(n), &["rev-parse", "HEAD"]))
+        .collect();
+    fs::write(alpha.join("new-file"), "valid change").unwrap();
+    commit_all(&alpha, "new alpha");
+    fs::write(beta.join("vex.ws"), "{ name = false }").unwrap();
+    commit_all(&beta, "invalid beta manifest");
+    assert_failure(&vex(&app, &["update"]), "reject incomplete candidate graph");
+    assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
+    for (name, head) in ["alpha", "beta"].iter().zip(heads) {
+        assert_eq!(
+            git_stdout(&app.join(".vex/deps").join(name), &["rev-parse", "HEAD"]),
+            head
+        );
+        assert_eq!(
+            git_stdout(
+                &app.join(".vex/deps").join(name),
+                &["rev-parse", "refs/remotes/origin/master"]
+            ),
+            head
+        );
+    }
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "last locked graph remains usable",
+    );
+}
+
+#[test]
+fn interrupted_publication_is_recovered_by_the_next_command_but_not_dry_run() {
+    let fixture = TestDir::new();
+    let alpha = fixture.path().join("alpha");
+    let app = fixture.path().join("app");
+    create_package(&alpha, "alpha", &[]);
+    init_git(&alpha);
+    commit_all(&alpha, "initial");
+    create_package(&app, "app", &[("alpha", git_url(&alpha), None)]);
+    assert_success(&vex(&app, &["fetch"]), "prepare graph");
+    let lock = read_lock(&app);
+    let live = app.join(".vex/deps/alpha");
+    let head = git_stdout(&live, &["rev-parse", "HEAD"]);
+    let transaction = app.join(".vex/transactions/123");
+    fs::create_dir_all(transaction.join("backup")).unwrap();
+    fs::create_dir_all(transaction.join("deps")).unwrap();
+    let record = format!(
+        r#"{{"version":1,"directory":"123","entries":[{{"name":"alpha","had_old":true}}],"old_lock":{lock:?},"new_lock":null,"committed":false}}"#
+    );
+    fs::write(app.join(".vex/transaction.json"), &record).unwrap();
+    fs::rename(&live, transaction.join("backup/alpha")).unwrap();
+    let dry = vex(&app, &["check", "--dry-run", "--locked"]);
+    assert_failure(&dry, "dry-run cannot recover");
+    assert!(String::from_utf8_lossy(&dry.stderr).contains("recovery is pending"));
+    assert!(!live.exists());
+    assert_eq!(
+        fs::read_to_string(app.join(".vex/transaction.json")).unwrap(),
+        record
+    );
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "restart recovery",
+    );
+    assert_eq!(git_stdout(&live, &["rev-parse", "HEAD"]), head);
+    assert_eq!(read_lock(&app), lock);
+    assert!(!app.join(".vex/transaction.json").exists());
+}
+
 struct TestDir(PathBuf);
 
 impl TestDir {

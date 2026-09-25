@@ -9,6 +9,14 @@ the dispatcher's explicit choice.
 ## Release contract
 
 - `Cargo.toml` is the single source of truth for the Vex version.
+- Official versions are normal `x.y.z` or SemVer prereleases. Build metadata
+  (`+...`) is not supported. `tools/release_version.py` is shared by x.py and the
+  workflow; leading zero numeric identifiers and empty prerelease parts are errors.
+- Rust 1.96.0 is the pinned release toolchain and initial supported MSRV. Keep
+  `rust-toolchain.toml`, all workspace rust-version declarations, and CI/release
+  setup aligned; run rustfmt and Clippy from that same toolchain.
+- Include the format-2 manifest and lockfile-v3 compatibility window and
+  migration notes in the next release (see `docs/release-readiness.md`).
 - The release tag must be the exact `v<version>` tag and point at the release
   commit. The upstream Release workflow creates it as part of
   `gh release create --target`; maintainers do not push the official tag from
@@ -40,6 +48,17 @@ checklist before tagging:
    osv-scanner scan source --lockfile Cargo.lock
    cargo metadata --locked --format-version 1
    ```
+
+   When Cargo.lock changes, regenerate and review the bundled third-party
+   notices from all locked package sources (including platform-specific crates):
+
+   ```sh
+   cargo metadata --locked --format-version 1 > /tmp/vex-cargo-metadata.json
+   python3 tools/dependency_notices.py /tmp/vex-cargo-metadata.json
+   ```
+
+   CI checks that THIRD_PARTY_LICENSES matches Cargo.lock. Review newly added
+   license terms and notices; generating this file does not replace that review.
 
 5. Run the complete local validation suite:
 
@@ -124,7 +143,8 @@ sha256sum --check SHA256SUMS
 Extract at least one native archive in a clean environment and run
 `vex --version` and `vex --help`. Complete the documented Wave project smoke
 test with a compatible `wavec` before publication. Confirm that each archive
-also contains `README.md`, `LICENSE`, `NOTICE`, and `COPYRIGHT`.
+also contains `README.md`, `LICENSE`, `NOTICE`, `COPYRIGHT`, and
+`THIRD_PARTY_LICENSES`.
 
 ## 4. Publish deliberately
 

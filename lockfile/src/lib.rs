@@ -4,10 +4,12 @@ mod parse;
 mod render;
 mod store;
 
+pub use parse::parse_lockfile as decode;
+pub use render::render_lockfile as encode;
 pub use store::{read_lockfile, write_lockfile};
 
 pub const LOCKFILE_NAME: &str = "vex.lock";
-pub const LOCKFILE_VERSION: i64 = 2;
+pub const LOCKFILE_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LockedSource {

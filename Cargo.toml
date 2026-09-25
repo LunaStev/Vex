@@ -2,6 +2,7 @@
 name = "vex"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Package manager and build tool for the Wave programming language"
 license.workspace = true
 repository.workspace = true
@@ -11,12 +12,13 @@ categories = ["command-line-utilities", "development-tools::build-utils"]
 publish = false
 
 [workspace]
-members = [".", "manifest", "lockfile", "resolver", "compiler", "toolchain"]
+members = [".", "manifest", "lockfile", "resolver", "compiler", "toolchain", "wson", "state"]
 resolver = "2"
 
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.96.0"
 license = "MPL-2.0"
 repository = "https://github.com/wavefnd/Vex"
 
@@ -27,6 +29,8 @@ resolver = { path = "resolver" }
 compiler = { path = "compiler" }
 toolchain = { path = "toolchain" }
 wson_rs = "0.2.5"
+wson = { path = "wson" }
+state = { path = "state" }
 serde_json = "1.0"
 
 [dependencies]
@@ -36,3 +40,5 @@ lockfile.workspace = true
 resolver.workspace = true
 compiler.workspace = true
 toolchain.workspace = true
+
+state.workspace = true

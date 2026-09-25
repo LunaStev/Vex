@@ -9,7 +9,7 @@ Vex is designed to sit above `wavec` in the same way Cargo sits above `rustc`: V
 - `wavec` compatible with the `build --dry-run --error-format=json` schema v1 contract
   and canonical package imports through Vex's `--dep` mappings
 - `git` when using Git dependencies
-- Rust toolchain only when building Vex from source
+- Rust 1.96.0 when building Vex from source (selected by `rust-toolchain.toml`)
 - Python 3.11 or newer when using the release tooling
 
 Vex runs `wavec` from `PATH` by default. Set `VEX_WAVEC=/path/to/wavec` to use a specific compiler binary.
@@ -116,6 +116,7 @@ Vex uses `vex.ws` as the project manifest. The extension is `.ws`.
 
 ```wson
 {
+    format = 2,
     name = "my_project",
     version = 0.1.0,
     lib = false,
@@ -126,11 +127,20 @@ Vex uses `vex.ws` as the project manifest. The extension is `.ws`.
 }
 ```
 
-The Vex v0.0.1 root manifest object accepts only `name`, `version`, `lib`, `description`,
+The current root manifest object accepts only `format`, `name`, `version`, `lib`, `description`,
 `author`, `license`, and `dependencies`. Dependency objects accept only `name`,
 `version`, `path`, `git`, `branch`, `tag`, and `rev`. Unknown fields are errors,
 including names intended as private or experimental extensions; adding a field
 requires an explicit Vex schema change.
+
+New manifests use `format = 2`: quoted strings decode JSON escapes (`\\`,
+`\"`, `\n`, `\r`, `\t`, and Unicode escapes). Strings can contain URLs, commas,
+comment markers, quotes, and Unicode without becoming WSON syntax. Comments are
+recognized only outside strings; duplicate fields are errors with source locations.
+Omitting `format`, or using `format = 1`, preserves legacy literal backslashes.
+Vex does not automatically rewrite old manifests or guess whether a backslash was
+intended as an escape. Ambiguous legacy quoting/multiline values need an explicit
+conversion to format 2. Older Vex releases cannot read the new format.
 
 ## Dependencies
 
@@ -186,7 +196,7 @@ consumers.
 
 On the first `vex fetch`, build, run, or check, Vex resolves each Git selector to an exact commit and records the complete transitive graph in `vex.lock`. Later commands reuse those commits without updating branches or tags. Run `vex update` explicitly to refresh every Git dependency and rewrite the lockfile.
 
-Pass one or more package names to update only those packages, including transitive dependencies. Unrelated packages keep their exact locked commits and are not fetched. If an updated package changes its dependencies, Vex recalculates that part of the graph while preserving unrelated locked packages.
+Pass one or more package names to update only those packages, including transitive dependencies. Names are validated from the current locally available graph before fetching. If a missing lockfile, checkout, or changed source prevents complete local discovery, run `vex fetch` first; a stale lockfile name list is not authoritative. Unrelated packages keep their exact locked commits and are not fetched. If an updated package changes its dependencies, Vex recalculates that part of the graph while preserving unrelated locked packages.
 
 ```sh
 # Refresh the complete Git dependency graph.
@@ -199,9 +209,10 @@ vex update alpha shared_core
 Commit `vex.lock` so the same manifest and lockfile select the same dependency graph. A dry run never fetches or rewrites dependencies; use `vex fetch` first when the locked checkout is not available locally.
 
 Inspect the resolved graph, including path sources, Git selectors, and short
-locked commit IDs. `vex tree` is read-only: it does not fetch or rewrite the
-lockfile beyond normal resolution, and it honors `--locked` and `--offline`
-the same way as build commands.
+locked commit IDs. `vex tree` performs normal dependency resolution and may clone,
+fetch, synchronize checkouts, and write the lockfile. Use `vex tree --locked
+--offline` to prevent network access and lockfile changes; local checkout
+synchronization can still occur.
 
 ```sh
 vex tree
@@ -260,21 +271,48 @@ VEX_WAVEC=/opt/wave/bin/wavec vex build --dry-run
 
 ### Lockfile compatibility
 
-Vex writes lockfile schema v2. Valid v2 files retain their exact source commits
-and graph edges; unknown fields, source-inapplicable fields, conflicting Git
-selectors, duplicate edges, missing nodes, and cycles are errors. Invalid and
-unknown future versions are never silently rewritten, including in offline mode.
+Vex writes lockfile schema v3 with explicitly decoded JSON string escapes.
+Schema v2 remains readable with literal backslashes. `--locked` preserves a valid
+v2 or v3 file byte-for-byte when its graph matches. A normal successful fetch can
+migrate v2 to v3 without changing source identities, commits, versions, or edges.
+Legacy v1 is unresolved: normal fetch may replace it after resolution, offline
+only if all sources are local; `--locked` rejects v1.
 
-Legacy v1 files are treated as unresolved graphs. `vex fetch` can replace them
-with v2 after successful resolution; `--offline` allows this only when all needed
-sources can be resolved locally. `--locked` rejects v1 instead of migrating it.
-Lockfile replacement is atomic: a failed write or replacement preserves the old
-file. This does not yet make concurrent commands or checkout changes transactional.
+Unknown future versions and malformed graphs are rejected without rewriting.
+Every semantic format change requires versioned fixtures and migration release
+notes. Old Vex releases cannot read v3. See [the migration notes](docs/release-readiness.md).
 
-Semantic format changes require an explicit schema-version change, compatibility
-fixtures, and documented migration behavior in the release PR and user documentation.
-Fixtures live in `tests/fixtures/lockfile/`; Git integration tests cover locked
-commit reuse and path fixtures cover relocation without absolute checkout paths.
+### Concurrent commands and recovery
+
+State commands coordinate through the persistent `.vex/state.lock`. Build/check
+hold exclusive protection from the first lockfile read until compilation ends;
+fetch/update/tree and init also participate. `--locked` and `--offline` do not
+make a command read-only. Help and info do not create coordination state.
+
+Dry-run uses shared protection and may create only `.vex/` and its coordination
+file. It never fetches, repairs dependencies, creates target output, or rewrites
+the lockfile. Its single compiler planning call returns validated JSON on stdout;
+this diagnostic compiler plan is not the future Vex metadata API.
+
+Git candidates are staged and fully validated before publication. Existing
+checkouts and backup/recovery records remain under `.vex/`; lockfile replacement
+is the commit point when the graph changes. General state commands recover an
+interrupted publication before reading its graph. Dry-run reports pending recovery
+and requires a normal command such as `vex fetch`. Dirty/conflicting recovery data
+is preserved and reported instead of reset. Multiple directory renames are not
+one filesystem-wide atomic operation: the project lock hides intermediate states
+from cooperating Vex commands, and the journal handles interruption.
+
+Never delete `state.lock` to unlock a project. Lock ownership belongs to OS handles,
+including live compiler/Git children, and ends when their handles close. Editing
+sources or running Git outside Vex does not participate in this coordination.
+
+`vex run` compiles to a unique `target/.vex-run/<generation>/` directory, releases
+project protection **before spawning** the program/runner, and preserves its
+working directory, environment, stdio, and runtime arguments. Subsequent builds
+and updates cannot overwrite that run's output. Initial policy does not perform
+automatic run-generation GC. Transaction backups are also retained; preserve them
+when diagnosing failed recovery. No automatic deletion based on PID or age occurs.
 
 Vex is a Cargo workspace. The root package contains only the CLI surface;
 manifest parsing, lockfile storage, dependency resolution, compiler invocation,
@@ -287,7 +325,9 @@ Vex/
 ├── lockfile/     # vex.lock parsing, rendering, and storage
 ├── resolver/     # dependency graph, Git, and path resolution
 ├── compiler/     # wavec invocation, plans, and argument validation
-└── toolchain/    # platform-specific wavec installation
+├── toolchain/    # platform-specific wavec installation
+├── state/        # project locks and publication primitives
+└── wson/         # shared versioned string/parser boundary
 ```
 
 The repository-level `x.py` script is the supported entry point for release
@@ -315,7 +355,7 @@ python3 x.py checksum x86_64-unknown-linux-gnu
 ```
 
 Archives contain the Vex executable together with `README.md`, `LICENSE`,
-`NOTICE`, and `COPYRIGHT`. Their file order, permissions, owners, and timestamps
+`NOTICE`, `COPYRIGHT`, and `THIRD_PARTY_LICENSES`. Their file order, permissions, owners, and timestamps
 are normalized. Set
 `SOURCE_DATE_EPOCH` to an explicit non-negative Unix timestamp when reproducing
 an artifact outside the tagged source revision.
@@ -357,4 +397,5 @@ sha256sum --check SHA256SUMS
 - [Release Process](RELEASING.md)
 - [Copyright](COPYRIGHT)
 - [Notice](NOTICE)
+- [Third-party Licenses](THIRD_PARTY_LICENSES)
 - [AI Usage Policy](ai.txt)

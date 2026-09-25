@@ -34,17 +34,44 @@ SPEC.loader.exec_module(release_tool)
 
 
 class ReleaseToolTests(unittest.TestCase):
+    def test_dependency_notices_match_locked_sources(self) -> None:
+        notices = (ROOT / "THIRD_PARTY_LICENSES").read_text(encoding="utf-8")
+        lock_bytes = (ROOT / "Cargo.lock").read_bytes()
+        self.assertIn(f"Cargo.lock SHA-256: {hashlib.sha256(lock_bytes).hexdigest()}", notices)
+        for package in tomllib.loads(lock_bytes.decode())["package"]:
+            if "source" in package:
+                self.assertIn(f"\n{package['name']} {package['version']}\n", notices)
+
+    def test_supported_rust_toolchain_is_consistent(self) -> None:
+        with (ROOT / "rust-toolchain.toml").open("rb") as source:
+            channel = tomllib.load(source)["toolchain"]["channel"]
+        self.assertEqual(channel, "1.96.0")
+        self.assertEqual(root_manifest["workspace"]["package"]["rust-version"], channel)
+        for workflow in ["ci.yml", "release.yml"]:
+            source = (ROOT / ".github/workflows" / workflow).read_text()
+            self.assertNotIn("toolchain install stable", source)
+            for installed in re.findall(r"rustup toolchain install ([^ ]+)", source):
+                self.assertEqual(installed, channel)
+        with mock.patch.dict(os.environ, {"RUSTUP_TOOLCHAIN": "nightly"}):
+            with mock.patch.object(release_tool.subprocess, "run") as run:
+                release_tool.run_command(["cargo", "build"])
+                self.assertEqual(run.call_args.kwargs["env"]["RUSTUP_TOOLCHAIN"], channel)
+
     def test_load_version_reads_cargo_manifest(self) -> None:
         self.assertEqual(release_tool.load_version(), EXPECTED_VERSION)
 
-    def test_load_version_accepts_full_semver(self) -> None:
+    def test_release_version_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manifest = Path(temporary) / "Cargo.toml"
-            manifest.write_text(
-                '[package]\nname = "fixture"\nversion = "1.2.3-rc.1+build.7"\n',
-                encoding="utf-8",
-            )
-            self.assertEqual(release_tool.load_version(manifest), "1.2.3-rc.1+build.7")
+            for version in ["0.0.1", "1.2.3-rc.1", "1.2.3-alpha-beta.0"]:
+                manifest.write_text(f'[package]\nversion = "{version}"\n', encoding="utf-8")
+                self.assertEqual(release_tool.load_version(manifest), version)
+            for version in ["1.2.3+build.7", "1.2.3-rc.1+build.7", "01.2.3", "1.2.3-", "1.2.3-a..b", "1.2.3-01", "v1.2.3"]:
+                manifest.write_text(f'[package]\nversion = "{version}"\n', encoding="utf-8")
+                with self.assertRaises(release_tool.ReleaseError):
+                    release_tool.load_version(manifest)
+                result = subprocess.run([sys.executable, str(ROOT / "tools/release_version.py"), version], capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
 
     def test_load_version_accepts_workspace_inheritance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

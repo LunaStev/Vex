@@ -49,7 +49,14 @@ fn vex_uses_path_and_override_wavec_and_rejects_unknown_schema() {
     let fake = compile_fake_wavec(&fixture.0);
     let override_log = fixture.0.join("override.log");
     let override_run = Command::new(env!("CARGO_BIN_EXE_vex"))
-        .args(["run", "--locked", "--offline"])
+        .args([
+            "run",
+            "--locked",
+            "--offline",
+            "--",
+            "--flag",
+            "with spaces",
+        ])
         .current_dir(&project)
         .env("VEX_WAVEC", &fake)
         .env("FAKE_WAVEC_LOG", &override_log)
@@ -58,6 +65,11 @@ fn vex_uses_path_and_override_wavec_and_rejects_unknown_schema() {
     assert_success(&override_run, "VEX_WAVEC override run");
     assert!(String::from_utf8_lossy(&override_run.stdout).contains("FAKE_WAVEC_EXECUTED"));
     assert_contract_invocations(&override_log);
+    let output = String::from_utf8_lossy(&override_run.stdout);
+    assert!(
+        output.contains("--flag") && output.contains("with spaces"),
+        "{output}"
+    );
 
     let bin_dir = fixture.0.join("bin");
     fs::create_dir_all(&bin_dir).expect("fake PATH directory must be created");
@@ -168,31 +180,8 @@ fn vex_passes_direct_and_transitive_library_mappings_to_wavec() {
 
 fn compile_fake_wavec(root: &Path) -> PathBuf {
     let source = root.join("fake_wavec.rs");
-    fs::write(
-        &source,
-        r#"
-use std::env;
-use std::fs::OpenOptions;
-use std::io::Write;
-
-fn main() {
-    let args = env::args().skip(1).collect::<Vec<_>>();
-    if let Ok(path) = env::var("FAKE_WAVEC_LOG") {
-        let mut log = OpenOptions::new().create(true).append(true).open(path).unwrap();
-        writeln!(log, "{}", args.join(" ")).unwrap();
-    }
-    if args.iter().any(|arg| arg == "--dry-run") {
-        let schema = env::var("FAKE_SCHEMA").unwrap_or_else(|_| "1".to_string());
-        println!(
-            "{{\"schema_version\":{schema},\"mode\":\"build\",\"target\":\"test-target\",\"emit\":\"bin\",\"emit_kinds\":[],\"control_mode\":null,\"forced_input_type\":null,\"inputs\":[],\"emit_jobs\":[],\"compile\":[],\"link\":null,\"execute\":null}}"
-        );
-    } else {
-        println!("FAKE_WAVEC_EXECUTED");
-    }
-}
-"#,
-    )
-    .expect("fake wavec source must be written");
+    fs::write(&source, include_str!("fixtures/fake_wavec.rs"))
+        .expect("fake wavec source must be written");
     let binary = root.join(if cfg!(windows) {
         "fake-wavec.exe"
     } else {

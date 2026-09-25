@@ -202,13 +202,19 @@ pub(crate) fn reject_dirty_checkout(destination: &Path, name: &str) -> Result<()
 
 pub(crate) fn command_in(destination: &Path) -> Command {
     let mut command = command();
-    command.arg("-C").arg(git_cli_path(destination).as_ref());
+    let path = git_cli_path(destination);
+    command.arg("-C").arg(path.as_ref());
+    command.arg("--git-dir").arg(path.join(".git"));
+    command.arg("--work-tree").arg(path.as_ref());
     command
 }
 
 fn command() -> Command {
     let mut command = Command::new("git");
     command.args(["-c", "protocol.ext.allow=never"]);
+    // Read-only graph discovery and dry-run status checks must not refresh the
+    // live index as a side effect. Explicit checkout/fetch operations still work.
+    command.env("GIT_OPTIONAL_LOCKS", "0");
     // A hook or parent tool can export repository-local context that overrides -C.
     // Keep authentication, SSH, proxies, HOME, and user config (including URL
     // rewrites) intact; remove only repository selection/object/index context.

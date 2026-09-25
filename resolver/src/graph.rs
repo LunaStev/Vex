@@ -6,12 +6,15 @@ use manifest::{Dependency, DependencySource, Manifest, MANIFEST_FILE};
 
 use crate::git;
 use crate::paths::{relative_to_root, resolve_path};
+use crate::transaction::Transaction;
 use crate::{ResolveOptions, UpdatePolicy};
 
 pub(crate) struct Resolver<'a> {
     options: ResolveOptions,
+    preflight: bool,
     root: PathBuf,
     dep_root: PathBuf,
+    transaction: Option<&'a Transaction>,
     root_name: String,
     root_manifest: PathBuf,
     existing: &'a Lockfile,
@@ -42,6 +45,7 @@ impl<'a> Resolver<'a> {
         options: ResolveOptions,
         root: PathBuf,
         dep_root: PathBuf,
+        transaction: Option<&'a Transaction>,
         root_name: String,
         root_manifest: PathBuf,
         existing: &'a Lockfile,
@@ -49,8 +53,10 @@ impl<'a> Resolver<'a> {
     ) -> Self {
         Self {
             options,
+            preflight: false,
             root,
             dep_root,
+            transaction,
             root_name,
             root_manifest,
             existing,
@@ -59,6 +65,48 @@ impl<'a> Resolver<'a> {
             visiting: Vec::new(),
             status,
         }
+    }
+
+    fn logical(&self, path: &Path) -> PathBuf {
+        if let Some(transaction) = self.transaction {
+            if let Ok(suffix) = path.strip_prefix(&transaction.stage) {
+                return self.root.join(".vex/deps").join(suffix);
+            }
+        }
+        path.to_owned()
+    }
+
+    fn resolve_path(&self, path: &str, parent: &Path) -> Result<PathBuf, String> {
+        let parent = self.logical(parent);
+        let candidate = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            parent.parent().unwrap_or(Path::new(".")).join(path)
+        };
+        let mut lexical = PathBuf::new();
+        for component in candidate.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    lexical.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => lexical.push(other.as_os_str()),
+            }
+        }
+        if let Some(transaction) = self.transaction {
+            if let Ok(suffix) = lexical.strip_prefix(self.root.join(".vex/deps")) {
+                if let Some(std::path::Component::Normal(name)) = suffix.components().next() {
+                    transaction.prepare(name.to_str().ok_or("non-UTF-8 managed package name")?)?;
+                }
+                let physical = transaction.stage.join(suffix);
+                return Ok(physical.canonicalize().unwrap_or(physical));
+            }
+        }
+        Ok(resolve_path(path, &parent))
+    }
+
+    pub(crate) fn local_preflight(&mut self) {
+        self.preflight = true;
     }
 
     pub(crate) fn into_packages(self) -> Vec<LockedPackage> {
@@ -134,7 +182,8 @@ impl<'a> Resolver<'a> {
     ) -> Result<(), String> {
         if dependency.name == self.root_name {
             let source = match &dependency.source {
-                DependencySource::Path { path } => resolve_path(path, parent_manifest)
+                DependencySource::Path { path } => self
+                    .resolve_path(path, parent_manifest)?
                     .to_string_lossy()
                     .into_owned(),
                 DependencySource::Git { url, .. } => url.clone(),
@@ -150,7 +199,7 @@ impl<'a> Resolver<'a> {
 
         let key = match &dependency.source {
             DependencySource::Path { path } => RequestKey::Path {
-                resolved: resolve_path(path, parent_manifest),
+                resolved: self.resolve_path(path, parent_manifest)?,
                 version: dependency.version.clone(),
             },
             DependencySource::Git {
@@ -193,10 +242,10 @@ impl<'a> Resolver<'a> {
 
         let (resolved_path, locked_source) = match &dependency.source {
             DependencySource::Path { path } => {
-                let resolved = resolve_path(path, parent_manifest);
+                let resolved = self.resolve_path(path, parent_manifest)?;
                 let source = LockedSource::Path {
                     requested: path.clone(),
-                    resolved: relative_to_root(&resolved, &self.root),
+                    resolved: relative_to_root(&self.logical(&resolved), &self.root),
                 };
                 (resolved, source)
             }
@@ -207,6 +256,9 @@ impl<'a> Resolver<'a> {
                 rev,
             } => {
                 let destination = self.dep_root.join(&dependency.name);
+                if let Some(transaction) = self.transaction {
+                    transaction.prepare(&dependency.name)?;
+                }
                 let commit = self.resolve_git_commit(dependency, &destination)?;
                 let source = LockedSource::Git {
                     url: url.clone(),
@@ -214,7 +266,7 @@ impl<'a> Resolver<'a> {
                     tag: tag.clone(),
                     rev: rev.clone(),
                     commit,
-                    resolved: relative_to_root(&destination, &self.root),
+                    resolved: relative_to_root(&self.logical(&destination), &self.root),
                 };
                 (destination, source)
             }
@@ -285,7 +337,7 @@ impl<'a> Resolver<'a> {
             return Err("internal error: expected Git dependency".to_string());
         };
 
-        let locked = if self.options.update.updates(&dependency.name) {
+        let locked = if !self.preflight && self.options.update.updates(&dependency.name) {
             None
         } else {
             self.existing

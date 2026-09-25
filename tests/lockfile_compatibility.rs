@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const V1: &str = include_str!("fixtures/lockfile/v1.ws");
 const V2: &str = include_str!("fixtures/lockfile/v2-path.ws");
+const V3: &str = include_str!("fixtures/lockfile/v3-path.ws");
 const FUTURE: &str = include_str!("fixtures/lockfile/future.ws");
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -87,7 +88,14 @@ fn historical_lockfiles_have_explicit_migration_and_reuse_behavior() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(fixture.lock(), V2);
+        if flags.contains(&"--locked") {
+            assert_eq!(fixture.lock(), V2);
+        } else {
+            assert_eq!(fixture.lock(), V3);
+        }
+        let output = fixture.run(V3, flags);
+        assert!(output.status.success());
+        assert_eq!(fixture.lock(), V3);
         let output = fixture.run(FUTURE, flags);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr)
@@ -150,8 +158,9 @@ fn invalid_v2_locks_fail_before_mutating_dependency_state() {
             assert!(stderr.contains(expected), "{stderr}");
             assert!(stderr.contains("help:"), "{stderr}");
             assert_eq!(fixture.lock(), input);
-            assert!(!fixture.0.join("app/.vex").exists());
-            assert_eq!(fs::read_dir(fixture.0.join("app")).unwrap().count(), 2);
+            assert!(fixture.0.join("app/.vex/state.lock").is_file());
+            assert_eq!(fs::read_dir(fixture.0.join("app/.vex")).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(fixture.0.join("app")).unwrap().count(), 3);
         }
     }
 }

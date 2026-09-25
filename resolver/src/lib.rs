@@ -1,14 +1,18 @@
 use std::collections::BTreeSet;
 
 use lockfile::{
-    read_lockfile, write_lockfile, LockedPackage, LockedSource, Lockfile, LOCKFILE_NAME,
-    LOCKFILE_VERSION,
+    read_lockfile, LockedPackage, LockedSource, Lockfile, LOCKFILE_NAME, LOCKFILE_VERSION,
 };
 use manifest::Manifest;
 
 mod git;
 mod graph;
 mod paths;
+mod transaction;
+
+pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), String> {
+    transaction::recover(guard.root(), dry_run)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ResolveOptions {
@@ -43,6 +47,7 @@ impl UpdatePolicy {
 #[derive(Debug)]
 pub struct Resolution {
     packages: Vec<LockedPackage>,
+    _guard: state::Guard,
 }
 
 impl Resolution {
@@ -90,6 +95,8 @@ where
         return Err("`--offline` cannot be used while updating Git dependencies".to_string());
     }
 
+    let guard = state::Guard::acquire(options.dry_run, &mut status)?;
+    recover_project(&guard, options.dry_run)?;
     let existing = read_lockfile()?;
     if options.locked {
         let lockfile = existing.as_ref().ok_or_else(|| {
@@ -97,7 +104,7 @@ where
                 "`{LOCKFILE_NAME}` is required by `--locked`\nhelp: run `vex fetch` and commit `{LOCKFILE_NAME}`"
             )
         })?;
-        if lockfile.version != LOCKFILE_VERSION {
+        if lockfile.version != 2 && lockfile.version != LOCKFILE_VERSION {
             return Err(format!(
                 "`{LOCKFILE_NAME}` version {} cannot be used with `--locked`; expected version {LOCKFILE_VERSION}\nhelp: run `vex fetch` to regenerate the lockfile",
                 lockfile.version
@@ -116,11 +123,42 @@ where
     let dry_run = options.dry_run;
     paths::validate_managed_root(&root, &dep_root)?;
 
+    if let UpdatePolicy::UpdateSelected(selected) = &options.update {
+        let mut preflight = graph::Resolver::new(
+            ResolveOptions {
+                dry_run: true,
+                update: UpdatePolicy::UpdateSelected(selected.clone()),
+                locked: false,
+                offline: true,
+            },
+            root.clone(),
+            dep_root.clone(),
+            None,
+            manifest.name.clone(),
+            root_manifest.clone(),
+            &existing,
+            &mut status,
+        );
+        // Local discovery must reuse pinned sources even for selected names.
+        preflight.local_preflight();
+        preflight.resolve_manifest_dependencies(manifest).map_err(|e| format!("cannot validate update names from the local current graph: {e}\nhelp: run `vex fetch` first"))?;
+        preflight.validate_selected_packages()?;
+    }
+    let transaction = if dry_run {
+        None
+    } else {
+        Some(transaction::Transaction::new(&root)?)
+    };
+    let physical_deps = transaction
+        .as_ref()
+        .map(|t| t.stage.clone())
+        .unwrap_or(dep_root);
     let packages = {
         let mut resolver = graph::Resolver::new(
             options,
             root,
-            dep_root,
+            physical_deps,
+            transaction.as_ref(),
             manifest.name.clone(),
             root_manifest,
             &existing,
@@ -131,7 +169,11 @@ where
         resolver.into_packages()
     };
     let resolved = Lockfile {
-        version: LOCKFILE_VERSION,
+        version: if (locked || dry_run) && existing.version == 2 {
+            2
+        } else {
+            LOCKFILE_VERSION
+        },
         packages,
     }
     .normalized();
@@ -159,10 +201,14 @@ where
                 }
             ),
         );
-        write_lockfile(&resolved)?;
+    }
+
+    if let Some(transaction) = transaction {
+        transaction.publish((resolved != existing).then(|| lockfile::encode(resolved.clone())))?;
     }
 
     Ok(Resolution {
         packages: resolved.packages,
+        _guard: guard,
     })
 }
