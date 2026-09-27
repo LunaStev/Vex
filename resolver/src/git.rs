@@ -354,7 +354,14 @@ fn command() -> Command {
     // even in ordinary Windows temp/project directories. Scope the setting to
     // our commands (including clone's index-pack child), not user Git config.
     #[cfg(windows)]
-    command.args(["-c", "core.longpaths=true"]);
+    command.args([
+        "-c",
+        "core.longpaths=true",
+        // unpack-objects still fails on long loose-object paths. Retaining
+        // fetched packs uses index-pack's long-path-aware file handling.
+        "-c",
+        "fetch.unpackLimit=0",
+    ]);
     // Read-only graph discovery and dry-run status checks must not refresh the
     // live index as a side effect. Explicit checkout/fetch operations still work.
     command.env("GIT_OPTIONAL_LOCKS", "0");

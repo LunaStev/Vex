@@ -22,7 +22,9 @@ supported build/merge contract.
   lockfile destinations are rejected. Source changes clone a fresh candidate.
   Windows Git invocations enable `core.longpaths` for the command and its Git
   children so staging and pack paths can exceed MAX_PATH without changing user
-  or repository Git configuration. Deep candidates use object-format discovery
+  or repository Git configuration. Windows fetches retain packs (`fetch.unpackLimit=0`)
+  because loose-object unpacking has a separate long-path limitation.
+  Deep candidates use object-format discovery
   followed by private initialization without Git templates, fetch and checkout,
   avoiding clone's separate
   absolute `GIT_DIR` limit. Git operations select `.git` relative to the checkout;
