@@ -360,7 +360,7 @@ fn command() -> Command {
         // unpack-objects still fails on long loose-object paths. Retaining
         // fetched packs uses index-pack's long-path-aware file handling.
         "-c",
-        "fetch.unpackLimit=0",
+        "fetch.unpackLimit=1",
     ]);
     // Read-only graph discovery and dry-run status checks must not refresh the
     // live index as a side effect. Explicit checkout/fetch operations still work.
