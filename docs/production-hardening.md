@@ -34,6 +34,11 @@ supported build/merge contract.
   directory-length limits. Vex rejects longer directories before transport,
   preserves existing checkout/lockfile state, and asks for a shorter project path.
   This bound does not restrict the length of files inside supported checkouts.
+  Git for Windows can cache an explicit `core.longpaths=false` before applying
+  command overrides. If it reports a long-path error, Vex preserves state and
+  advises checking `git config --show-origin --get-all core.longpaths`: remove
+  the explicit disabling value or enable long paths in the reported config.
+  Vex does not rewrite that user configuration.
 - **Reuse (#146):** a matching source, SHA, clean worktree and detached HEAD can
   be reused without copying, publishing or retaining a new backup. The project
   lease still spans compiler use. Real transitions keep transactional publication.

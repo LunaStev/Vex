@@ -1024,8 +1024,8 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
         }
         app.push("app");
         create_package(&app, "app", &[("dep", git_url(&dep), None)]);
-        let config = fixture.path().join("longpaths-disabled.gitconfig");
-        fs::write(&config, "[core]\n\tlongpaths = false\n").unwrap();
+        let config = fixture.path().join("preserved.gitconfig");
+        fs::write(&config, "[vexTest]\n\tmarker = preserve\n").unwrap();
         let original_config = fs::read(&config).unwrap();
         let fetch = |args: &[&str]| {
             let output = Command::new(env!("CARGO_BIN_EXE_vex"))
@@ -1071,7 +1071,35 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
             .unwrap();
         assert_success(&result, "restore a pinned checkout with long source paths");
         assert_eq!(fs::read(restored.join("vex.lock")).unwrap(), locked_bytes);
-        assert_eq!(fs::read(config).unwrap(), original_config);
+        assert_eq!(fs::read(&config).unwrap(), original_config);
+        #[cfg(windows)]
+        {
+            // Some Git for Windows versions cache an explicit false setting
+            // before applying -c. Preserve state and explain this upstream
+            // limitation; also permit versions that correctly honor -c.
+            let disabled = "[core]\n\tlongpaths = false\n";
+            fs::write(&config, disabled).unwrap();
+            let result = Command::new(env!("CARGO_BIN_EXE_vex"))
+                .current_dir(&app)
+                .args(["update", "dep"])
+                .env("GIT_CONFIG_GLOBAL", &config)
+                .output()
+                .unwrap();
+            if !result.status.success() {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                assert_eq!(result.status.code(), Some(5), "{stderr}");
+                assert!(
+                    stderr.contains("git config --show-origin --get-all core.longpaths"),
+                    "{stderr}"
+                );
+            }
+            assert_eq!(fs::read(app.join("vex.lock")).unwrap(), locked_bytes);
+            assert_eq!(
+                fs::read(checkout.join(nested_file)).unwrap(),
+                b"pub fun updated() {}\n"
+            );
+            assert_eq!(fs::read_to_string(config).unwrap(), disabled);
+        }
     }
 }
 

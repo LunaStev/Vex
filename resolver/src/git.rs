@@ -466,7 +466,15 @@ fn git_error(action: &str, status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> 
     } else {
         "<no output>"
     };
-    source::redact(&format!("could not {action} (status {status}): {details}"))
+    let message = format!("could not {action} (status {status}): {details}");
+    #[cfg(windows)]
+    let message = if details.contains("Filename too long") || details.contains("File name too long")
+    {
+        format!("{message}\nhelp: use a shorter project path and check `git config --show-origin --get-all core.longpaths`; Git for Windows can retain an explicit false value during early path handling despite a command override; remove that explicit false setting or enable long paths in its reported configuration file")
+    } else {
+        message
+    };
+    source::redact(&message)
 }
 
 trait GitOutput {
