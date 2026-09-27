@@ -120,9 +120,8 @@ clean result. Exceptions require an exact package/version/advisory, owner, reaso
 and expiry within 90 days; none are pre-approved.
 
 Required Quality CI and release validation run the audit; an additional weekly
-workflow detects advisories after merge. Dependency updates are handled manually;
-do not enable automated dependency-update PRs. Action uses are pinned to verified
-full commit SHAs. Release build jobs
+workflow detects advisories after merge. Dependabot proposes Cargo and Action
+updates. Action uses are pinned to verified full commit SHAs. Release build jobs
 attest their archives; publication verifies repository, signer workflow, master
 ref and exact source/signer commit before creating the release. No release
 workflow has been dispatched to test this unpublished branch.
