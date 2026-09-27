@@ -51,6 +51,9 @@ pub(crate) fn ensure_repository(
         run(
             command().current_dir(destination).args([
                 "init",
+                // Template copying precedes Git's long-path configuration.
+                // Private candidates need objects/refs, not template hooks.
+                "--template=",
                 &format!("--object-format={format}"),
                 "--",
                 ".",

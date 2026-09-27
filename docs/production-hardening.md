@@ -23,7 +23,8 @@ supported build/merge contract.
   Windows Git invocations enable `core.longpaths` for the command and its Git
   children so staging and pack paths can exceed MAX_PATH without changing user
   or repository Git configuration. Deep candidates use object-format discovery
-  followed by private initialization, fetch and checkout, avoiding clone's separate
+  followed by private initialization without Git templates, fetch and checkout,
+  avoiding clone's separate
   absolute `GIT_DIR` limit. Git operations select `.git` relative to the checkout;
   SHA-1/SHA-256 and fresh locked restoration are covered by the long-path fixture.
   Windows checkout directories themselves (including staging) are limited to
