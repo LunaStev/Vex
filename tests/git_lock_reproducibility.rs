@@ -1002,7 +1002,9 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
         let fixture = TestDir::new();
         let dep = fixture.path().join("dep");
         create_package(&dep, "dep", &[]);
-        let nested_file = Path::new("src/nested_directory_one/nested_directory_two/value.wave");
+        let nested_file = Path::new(
+            "src/nested_directory_one_with_a_long_name/nested_directory_two_with_a_long_name/nested_directory_three_with_a_long_name/value.wave",
+        );
         fs::create_dir_all(dep.join(nested_file).parent().unwrap()).unwrap();
         fs::write(dep.join(nested_file), "pub fun value() {}\n").unwrap();
         git_stdout(
@@ -1017,8 +1019,8 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
         let initial = commit_all(&dep, "initial long-path fixture");
 
         let mut app = fixture.path().to_path_buf();
-        while app.as_os_str().len() < 170 {
-            app.push("nested project directory");
+        while app.as_os_str().len() < 100 {
+            app.push("path");
         }
         app.push("app");
         create_package(&app, "app", &[("dep", git_url(&dep), None)]);
@@ -1067,11 +1069,50 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
             .env("GIT_CONFIG_GLOBAL", &config)
             .output()
             .unwrap();
-        assert_success(
-            &result,
-            "restore a pinned checkout through deep-path initialization",
-        );
+        assert_success(&result, "restore a pinned checkout with long source paths");
         assert_eq!(fs::read(restored.join("vex.lock")).unwrap(), locked_bytes);
         assert_eq!(fs::read(config).unwrap(), original_config);
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn unsupported_windows_checkout_directory_preserves_existing_state() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    commit_all(&dep, "initial");
+    let app = fixture.path().join("app");
+    create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+    assert_success(
+        &vex(&app, &["fetch"]),
+        "initial fetch before moving project",
+    );
+    let lock = fs::read(app.join("vex.lock")).unwrap();
+    let parsed = lockfile::decode(std::str::from_utf8(&lock).unwrap()).unwrap();
+    let lockfile::LockedSource::Git { resolved, .. } = &parsed.packages[0].source else {
+        panic!()
+    };
+    let source = fs::read(app.join(resolved).join("src/lib.wave")).unwrap();
+    let mut deep = fixture.path().to_path_buf();
+    while deep.as_os_str().len() < 175 {
+        deep.push("nested project directory");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    deep.push("app");
+    fs::rename(&app, &deep).unwrap();
+    let output = vex(&deep, &["update", "dep"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(5), "{stderr}");
+    assert!(
+        stderr.contains("move the project to a shorter path"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Cloning"), "{stderr}");
+    assert_eq!(fs::read(deep.join("vex.lock")).unwrap(), lock);
+    assert_eq!(
+        fs::read(deep.join(resolved).join("src/lib.wave")).unwrap(),
+        source
+    );
 }

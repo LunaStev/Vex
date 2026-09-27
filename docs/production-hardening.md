@@ -26,6 +26,11 @@ supported build/merge contract.
   followed by private initialization, fetch and checkout, avoiding clone's separate
   absolute `GIT_DIR` limit. Git operations select `.git` relative to the checkout;
   SHA-1/SHA-256 and fresh locked restoration are covered by the long-path fixture.
+  Windows checkout directories themselves (including staging) are limited to
+  240 UTF-16 code units because process startup and early Git discovery retain
+  directory-length limits. Vex rejects longer directories before transport,
+  preserves existing checkout/lockfile state, and asks for a shorter project path.
+  This bound does not restrict the length of files inside supported checkouts.
 - **Reuse (#146):** a matching source, SHA, clean worktree and detached HEAD can
   be reused without copying, publishing or retaining a new backup. The project
   lease still spans compiler use. Real transitions keep transactional publication.

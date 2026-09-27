@@ -76,6 +76,19 @@ pub(crate) fn validate_managed_root(root: &Path, dep_root: &Path) -> Result<(), 
 }
 
 pub(crate) fn validate_managed_checkout_path(destination: &Path) -> Result<(), Error> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        // core.longpaths extends file access, not CreateProcess's working
+        // directory or Git's early repository discovery. Reserve room for .git
+        // and reject before transport rather than failing midway through Git.
+        if git_cli_path(destination).as_os_str().encode_wide().count() > 240 {
+            return Err(Error::environment(format!(
+                "managed Git checkout directory exceeds the supported Windows path length: `{}`\nhelp: move the project to a shorter path; checkout directories (including staging) must be at most 240 UTF-16 code units",
+                destination.display()
+            )));
+        }
+    }
     reject_symbolic_link(destination, "managed dependency checkout")?;
     reject_symbolic_link(
         &destination.join(".git"),
