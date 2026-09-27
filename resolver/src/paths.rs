@@ -1,11 +1,21 @@
+use diagnostic::Error;
 use std::borrow::Cow;
-#[cfg(test)]
+/// Filesystem identity is independent of platform case folding and reserved
+/// device names. The full SHA-256 also bounds directory component length.
+pub(crate) fn checkout_name(package: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("pkg_{:x}", Sha256::digest(package.as_bytes()))
+}
+
+#[cfg(all(test, unix))]
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) fn env_root() -> Result<PathBuf, String> {
+pub(crate) fn env_root() -> Result<PathBuf, Error> {
     std::env::current_dir()
-        .map_err(|error| format!("failed to determine project directory: {error}"))
+        .map_err(|error| {
+            Error::environment(format!("failed to determine project directory: {error}"))
+        })
         .map(|path| path.canonicalize().unwrap_or(path))
 }
 
@@ -60,12 +70,12 @@ pub(crate) fn relative_to_root(path: &Path, root: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn validate_managed_root(root: &Path, dep_root: &Path) -> Result<(), String> {
+pub(crate) fn validate_managed_root(root: &Path, dep_root: &Path) -> Result<(), Error> {
     reject_symbolic_link(&root.join(".vex"), "managed Vex directory")?;
     reject_symbolic_link(dep_root, "managed dependency directory")
 }
 
-pub(crate) fn validate_managed_checkout_path(destination: &Path) -> Result<(), String> {
+pub(crate) fn validate_managed_checkout_path(destination: &Path) -> Result<(), Error> {
     reject_symbolic_link(destination, "managed dependency checkout")?;
     reject_symbolic_link(
         &destination.join(".git"),
@@ -73,8 +83,8 @@ pub(crate) fn validate_managed_checkout_path(destination: &Path) -> Result<(), S
     )
 }
 
-fn reject_symbolic_link(path: &Path, label: &str) -> Result<(), String> {
-    state::reject_link(path).map_err(|e| format!("{label}: {e}"))
+fn reject_symbolic_link(path: &Path, label: &str) -> Result<(), Error> {
+    state::reject_link(path).map_err(|e| Error::environment(format!("{label}: {e}")))
 }
 
 pub(crate) fn git_cli_path(path: &Path) -> Cow<'_, Path> {

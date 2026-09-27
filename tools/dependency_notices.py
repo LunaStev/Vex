@@ -51,7 +51,7 @@ def generate(metadata: dict) -> str:
             f"Source: {package['source']}",
         ]
         for path in files:
-            content = path.read_text(encoding="utf-8").strip()
+            content = "\n".join(line.rstrip() for line in path.read_text(encoding="utf-8").splitlines()).strip()
             if not content:
                 raise ValueError(f"empty license file: {path}")
             digest = hashlib.sha256(content.encode()).hexdigest()

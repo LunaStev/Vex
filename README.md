@@ -73,11 +73,24 @@ install -m 0755 target/release/vex ~/.local/bin/vex
 ```
 
 Install `wavec` separately and make it available on `PATH`, or set
-`VEX_WAVEC` to its full path. `vex setup wavec` is an explicit convenience
-command that downloads and executes the official installer from
-`wave-lang.dev`; review that trust and network boundary before using it. A
-specific compiler can be requested with `vex setup wavec --version
-0.2.0-pre-beta`.
+`VEX_WAVEC` to its full path. `vex setup wavec --version 0.2.0-pre-beta`
+downloads the official host archive, verifies SHA256SUMS and available GitHub
+provenance, extracts a new versioned directory, checks the executable version and
+atomically switches a current-installation pointer. Previous installations remain
+available. Downloads require `curl` (`curl.exe` on Windows), and `gh` when
+published provenance must be verified. Missing host artifacts fail explicitly.
+
+`VEX_TOOLCHAIN_HOME` selects the installation prefix (default:
+`$HOME/.vex/toolchains`, or `%LOCALAPPDATA%/.vex/toolchains` on Windows).
+Compiler selection prefers `VEX_WAVEC`, then `PATH`, then the managed installation.
+`--script-fallback` explicitly permits downloading and running the official
+`wave-lang.dev` installer if artifact installation fails; it is never automatic.
+This fallback follows the external script's installation policy.
+
+Installing an artifact does not prove package-language compatibility. Official
+Wave `0.2.0-pre-beta` supports Hello World but not the canonical package imports
+required here. Required real-compiler CI remains deferred until a compatible
+official release is available.
 
 ## Commands
 
@@ -90,7 +103,7 @@ vex fetch [--locked] [--offline]
 vex update [<package>...]
 vex info
 vex tree [--locked] [--offline]
-vex setup wavec [--version <version>]
+vex setup wavec [--version <version>] [--script-fallback]
 vex --version
 ```
 
@@ -172,11 +185,11 @@ Git dependency:
 
 A dependency entry must use exactly one of `path` or `git`. Git dependencies may specify at most one of `branch`, `tag`, or `rev`; those selectors are invalid on path dependencies. Source and selector values cannot be empty or whitespace-only. Dependency names must be unique within a manifest and cannot reuse the root package name.
 
-Fetched Git dependencies are stored under `.vex/deps/<name>`. Every fetched dependency must contain a `vex.ws` file at its root. Dependency manifests are resolved recursively, and a package name must identify one source and version requirement across the graph.
+Fetched Git dependencies are stored under `.vex/deps/pkg_<SHA-256 of package name>`. This stable encoding separates case-sensitive import names and avoids Windows device names. Existing `.vex/deps/<name>` checkouts remain usable with `--locked`; a normal fetch stages migration to the encoded path and updates the lockfile while retaining the old checkout. Dry-run does not migrate. Every fetched dependency must contain a `vex.ws` file at its root. Dependency manifests are resolved recursively, and a package name must identify one source and version requirement across the graph.
 
 Vex refuses to use a managed Git checkout with tracked edits or untracked
 files, even if its HEAD matches `vex.lock`. If this happens, preserve your
-changes outside `.vex/deps/<name>`, restore that checkout yourself, and rerun
+changes outside the managed checkout, restore that checkout yourself, and rerun
 `vex fetch`. Vex will not discard local changes automatically.
 
 Every dependency is a library package: its manifest must set `lib = true` and
@@ -251,6 +264,32 @@ vex build --locked --offline
 
 `vex update` intentionally accepts neither option because it refreshes Git refs and rewrites the lockfile.
 
+Git commands use null stdin, suppress terminal credential prompts and have a
+300-second per-command deadline. `VEX_GIT_TIMEOUT` accepts 1–86400 seconds.
+Credential helpers, SSH agents and user Git rewrites remain available. Cancellation
+supervises child process trees; user programs inherit stdio without an implicit
+timeout. Successful commands/help/version return 0. Vex failures return 1 for
+internal errors, 2 for CLI usage, 3 for project/dependency resolution, 4 for
+compiler failures, 5 for environment, 124 for timeout, and 130 for cancellation.
+`vex run` preserves program exit codes; Unix signal exits translate to `128 + signal`.
+
+Use `vex --message-file build.jsonl build` to record schema-1 JSON Lines without
+mixing JSON into compiler or program stdio. Each completed report ends with a
+`finished` event containing `origin` (`vex` or `program`), `category`, `exit_code`,
+and `success`. A program may return any of Vex's own codes; use `origin` to tell
+which failed. Missing completion means an incomplete report. Existing report
+files are never overwritten; choose a fresh path in an existing directory.
+With `--dry-run`, Vex checks that destination but creates no report file; an
+existing destination still errors. A reporting failure before program execution
+stops Vex. After execution it warns on stderr and preserves the program exit code.
+See [the CLI message contract](docs/cli-contract-design.md) for the full schema.
+
+HTTP userinfo, SSH passwords and recognized authentication query fields are
+excluded from rendered Git sources and new lockfiles. SSH routing usernames and
+other query fields remain part of identity. A credential-bearing historical
+lockfile requires ordinary fetch migration; `--locked` preserves it and errors.
+Use Git credential helpers or SSH agents to avoid credentials in your manifest.
+
 ## Build Model
 
 Vex uses `wavec` internally and validates the compiler dry-run plan before executing a real build. Vex commands stay manifest-based; raw compiler flags belong to `wavec`, not to Vex.
@@ -272,7 +311,7 @@ VEX_WAVEC=/opt/wave/bin/wavec vex build --dry-run
 ### Lockfile compatibility
 
 Vex writes lockfile schema v3 with explicitly decoded JSON string escapes.
-Schema v2 remains readable with literal backslashes. `--locked` preserves a valid
+Schema v2 remains readable with literal backslashes. New resolved paths use `/` on every OS; legacy native Windows paths need migration on Windows. Manifest paths retain their declared meaning; use `/` for portable relative paths. `--locked` preserves a valid
 v2 or v3 file byte-for-byte when its graph matches. A normal successful fetch can
 migrate v2 to v3 without changing source identities, commits, versions, or edges.
 Legacy v1 is unresolved: normal fetch may replace it after resolution, offline
@@ -281,6 +320,16 @@ only if all sources are local; `--locked` rejects v1.
 Unknown future versions and malformed graphs are rejected without rewriting.
 Every semantic format change requires versioned fixtures and migration release
 notes. Old Vex releases cannot read v3. See [the migration notes](docs/release-readiness.md).
+
+Names must match `[A-Za-z_][A-Za-z0-9_]*`; init rejects invalid directory names
+before creating state. Init refuses existing destinations, publishes the manifest
+last and recovers interrupted creation from its journal. Edited or replaced files
+are preserved. Ordinary/offline fetch creates missing empty lockfiles; locked
+mode always requires an existing lockfile.
+
+WSON documents and captured compiler plans are bounded at 8 MiB; WSON nesting is
+bounded at 128. Escaped strings and literal legacy backslashes retain their
+version-specific behavior.
 
 ### Concurrent commands and recovery
 
@@ -326,7 +375,10 @@ Vex/
 ├── resolver/     # dependency graph, Git, and path resolution
 ├── compiler/     # wavec invocation, plans, and argument validation
 ├── toolchain/    # platform-specific wavec installation
-├── state/        # project locks and publication primitives
+├── state/        # project locks, init recovery, and publication primitives
+├── process/      # bounded child execution and cancellation
+├── diagnostic/   # shared typed error categories
+├── source/       # Git source identity and credential-safe rendering
 └── wson/         # shared versioned string/parser boundary
 ```
 
@@ -399,3 +451,8 @@ sha256sum --check SHA256SUMS
 - [Notice](NOTICE)
 - [Third-party Licenses](THIRD_PARTY_LICENSES)
 - [AI Usage Policy](ai.txt)
+
+## Stabilization follow-up
+
+See [the current roadmap](docs/roadmap.md) and [production hardening notes](docs/production-hardening.md)
+for implemented contracts, verification limits and remaining acceptance work.

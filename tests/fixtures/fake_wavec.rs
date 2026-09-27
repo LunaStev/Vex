@@ -14,13 +14,23 @@ fn checkpoint(name: &str) {
 }
 
 fn main() {
+    if env::current_exe().unwrap().file_stem().unwrap() == "git" {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        return;
+    }
     let args = env::args().skip(1).collect::<Vec<_>>();
     if env::current_exe().unwrap().file_stem().unwrap() == "program" {
         if let Ok(vex) = env::var("VEX_TEST_NESTED") {
             assert!(std::process::Command::new(vex).args(["fetch", "--locked", "--offline"]).status().unwrap().success());
         }
+        if env::var_os("VEX_TEST_RUN").is_some() { fs::write("program.pid", std::process::id().to_string()).unwrap(); }
         checkpoint("RUN");
+        if env::var_os("VEX_TEST_ECHO_STDIN").is_some() {
+            let mut line = String::new(); std::io::stdin().read_line(&mut line).unwrap();
+            print!("PROGRAM_STDIN:{line}"); eprintln!("PROGRAM_STDERR");
+        }
         println!("FAKE_WAVEC_EXECUTED {:?}", args);
+        if let Ok(code) = env::var("VEX_TEST_RUN_EXIT") { std::process::exit(code.parse().unwrap()); }
         return;
     }
     if let Ok(path) = env::var("FAKE_WAVEC_LOG") {
@@ -44,6 +54,7 @@ fn main() {
     } else {
         assert!(!args.iter().any(|a| a == "--run" || a == "--"));
         checkpoint("COMPILE");
+        if let Ok(code) = env::var("VEX_TEST_COMPILE_EXIT") { std::process::exit(code.parse().unwrap()); }
         if let Some(generation) = generation {
             fs::create_dir_all(&generation).unwrap();
             fs::copy(env::current_exe().unwrap(), generation.join(if cfg!(windows) { "program.exe" } else { "program" })).unwrap();

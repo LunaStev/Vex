@@ -1,47 +1,56 @@
-pub fn setup(args: &[String]) {
+use diagnostic::Error;
+
+pub fn setup(args: &[String]) -> Result<(), Error> {
+    const USAGE: &str = "usage: vex setup wavec [--version <version>] [--script-fallback]";
     if matches!(args, [help] if help == "-h" || help == "--help")
         || matches!(args, [wavec, help] if wavec == "wavec" && (help == "-h" || help == "--help"))
     {
-        println!("usage: vex setup wavec [--version <version>]");
-        return;
+        println!("{USAGE}");
+        return Ok(());
     }
     if args.first().map(String::as_str) != Some("wavec") {
-        eprintln!("error: usage: vex setup wavec [--version <version>]");
-        std::process::exit(2);
+        return Err(Error::usage(USAGE));
     }
-
     let mut version: Option<&str> = None;
+    let mut script_fallback = false;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
+            "--script-fallback" if !script_fallback => {
+                script_fallback = true;
+                index += 1;
+            }
             "--version" => {
                 if version.is_some() {
-                    eprintln!("error: `--version` may only be specified once");
-                    std::process::exit(2);
+                    return Err(Error::usage("`--version` may only be specified once"));
                 }
-                if index + 1 >= args.len() {
-                    eprintln!("error: missing value for --version");
-                    std::process::exit(2);
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| Error::usage("missing value for --version"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(Error::usage(
+                        "`--version` must be a version value, not an option",
+                    ));
                 }
-                if args[index + 1].is_empty() || args[index + 1].starts_with('-') {
-                    eprintln!("error: `--version` must be a version value, not an option");
-                    std::process::exit(2);
-                }
-                version = Some(args[index + 1].as_str());
+                toolchain::validate_version(value).map_err(Error::usage)?;
+                version = Some(value.as_str());
                 index += 2;
             }
             unknown => {
-                eprintln!("error: unknown setup option `{unknown}`");
-                eprintln!("usage: vex setup wavec [--version <version>]");
-                std::process::exit(2);
+                return Err(Error::usage(format!(
+                    "unknown setup option `{unknown}`\n{USAGE}"
+                )))
             }
         }
     }
-
     println!("installing wavec {}", toolchain::requested_version(version));
-    if let Err(error) = toolchain::install_wavec(version) {
-        eprintln!("error: {error}");
-        std::process::exit(1);
+    match toolchain::install_wavec(version) {
+        Ok(binary) => println!("wavec installed at {}", binary.display()),
+        Err(error) if script_fallback && !process::cancelled() => {
+            crate::ui::error(format!("artifact installation failed: {error}\nusing explicitly requested official script fallback"));
+            toolchain::install_wavec_script(version).map_err(Error::environment)?;
+        }
+        Err(error) => return Err(Error::environment(error)),
     }
-    println!("wavec installed successfully");
+    Ok(())
 }

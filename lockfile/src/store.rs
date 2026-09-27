@@ -5,15 +5,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{parse, render, Lockfile, LOCKFILE_NAME};
 
-pub fn read_lockfile() -> Result<Option<Lockfile>, String> {
+pub fn read_lockfile() -> Result<Option<Lockfile>, diagnostic::Error> {
     let path = Path::new(LOCKFILE_NAME);
-    if !path.exists() {
-        return Ok(None);
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+        Ok(_) => {}
     }
 
-    let raw =
-        fs::read_to_string(path).map_err(|e| format!("failed to read `{LOCKFILE_NAME}`: {e}"))?;
-    parse::parse_lockfile(&raw).map(Some)
+    let raw = wson::read_document(path).map_err(|e| {
+        diagnostic::Error::new(
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                diagnostic::Category::Resolution
+            } else {
+                diagnostic::Category::Environment
+            },
+            format!("failed to read `{LOCKFILE_NAME}`: {e}"),
+        )
+    })?;
+    parse::parse_lockfile(&raw)
+        .map(Some)
+        .map_err(diagnostic::Error::resolution)
 }
 
 pub fn write_lockfile(lockfile: &Lockfile) -> Result<(), String> {

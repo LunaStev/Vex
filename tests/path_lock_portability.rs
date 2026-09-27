@@ -95,3 +95,41 @@ fn assert_success(output: &Output, action: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn path_diamond_reordering_preserves_a_locked_graph() {
+    let fixture = TestDir::new();
+    for (name, child) in [
+        ("leaf", ""),
+        ("left", "../leaf"),
+        ("right", "../left/../leaf"),
+    ] {
+        let root = fixture.0.join(name);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.wave"), "pub fun marker() {}\n").unwrap();
+        let dependencies = if child.is_empty() {
+            "[]".into()
+        } else {
+            format!("[{{name=\"leaf\",path={child:?}}}]")
+        };
+        fs::write(
+            root.join("vex.ws"),
+            format!("{{name={name:?},lib=true,dependencies={dependencies}}}"),
+        )
+        .unwrap();
+    }
+    let app = fixture.0.join("app");
+    fs::create_dir(&app).unwrap();
+    let manifest = |first: &str, second: &str| {
+        format!("{{name=\"app\",dependencies=[{{name={first:?},path=\"../{first}\"}},{{name={second:?},path=\"../{second}\"}}]}}")
+    };
+    fs::write(app.join("vex.ws"), manifest("left", "right")).unwrap();
+    assert_success(&vex(&app, &["fetch"]), "resolve diamond");
+    let lock = fs::read(app.join("vex.lock")).unwrap();
+    fs::write(app.join("vex.ws"), manifest("right", "left")).unwrap();
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "reordered diamond",
+    );
+    assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
+}

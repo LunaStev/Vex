@@ -33,7 +33,10 @@ fn insufficient_local_graph_requires_fetch_without_implicit_discovery() {
 
     assert_success(&vex(&app, &["fetch"]), "prepare graph");
     let lock = fs::read(app.join("vex.lock")).unwrap();
-    let head = git_stdout(&app.join(".vex/deps/alpha"), &["rev-parse", "HEAD"]);
+    let head = git_stdout(
+        &app.join(".vex/deps/pkg_8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"),
+        &["rev-parse", "HEAD"],
+    );
     create_package(
         &app,
         "app",
@@ -53,10 +56,12 @@ fn insufficient_local_graph_requires_fetch_without_implicit_discovery() {
         );
         assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
         assert_eq!(
-            git_stdout(&app.join(".vex/deps/alpha"), &["rev-parse", "HEAD"]),
+            git_stdout(&app.join(".vex/deps/pkg_8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"), &["rev-parse", "HEAD"]),
             head
         );
-        assert!(!app.join(".vex/deps/beta").exists());
+        assert!(!app
+            .join(".vex/deps/pkg_f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753")
+            .exists());
     }
 }
 
@@ -83,7 +88,7 @@ fn later_invalid_dependency_preserves_every_live_checkout_and_lock() {
     let lock = fs::read(app.join("vex.lock")).unwrap();
     let heads: Vec<_> = ["alpha", "beta"]
         .iter()
-        .map(|n| git_stdout(&app.join(".vex/deps").join(n), &["rev-parse", "HEAD"]))
+        .map(|n| git_stdout(&checkout(&app, n), &["rev-parse", "HEAD"]))
         .collect();
     fs::write(alpha.join("new-file"), "valid change").unwrap();
     commit_all(&alpha, "new alpha");
@@ -93,12 +98,12 @@ fn later_invalid_dependency_preserves_every_live_checkout_and_lock() {
     assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
     for (name, head) in ["alpha", "beta"].iter().zip(heads) {
         assert_eq!(
-            git_stdout(&app.join(".vex/deps").join(name), &["rev-parse", "HEAD"]),
+            git_stdout(&checkout(&app, name), &["rev-parse", "HEAD"]),
             head
         );
         assert_eq!(
             git_stdout(
-                &app.join(".vex/deps").join(name),
+                &checkout(&app, name),
                 &["rev-parse", "refs/remotes/origin/master"]
             ),
             head
@@ -121,16 +126,22 @@ fn interrupted_publication_is_recovered_by_the_next_command_but_not_dry_run() {
     create_package(&app, "app", &[("alpha", git_url(&alpha), None)]);
     assert_success(&vex(&app, &["fetch"]), "prepare graph");
     let lock = read_lock(&app);
-    let live = app.join(".vex/deps/alpha");
+    let live =
+        app.join(".vex/deps/pkg_8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8");
     let head = git_stdout(&live, &["rev-parse", "HEAD"]);
     let transaction = app.join(".vex/transactions/123");
     fs::create_dir_all(transaction.join("backup")).unwrap();
     fs::create_dir_all(transaction.join("deps")).unwrap();
     let record = format!(
-        r#"{{"version":1,"directory":"123","entries":[{{"name":"alpha","had_old":true}}],"old_lock":{lock:?},"new_lock":null,"committed":false}}"#
+        r#"{{"version":1,"directory":"123","entries":[{{"name":"pkg_8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8","had_old":true}}],"old_lock":{lock:?},"new_lock":null,"committed":false}}"#
     );
     fs::write(app.join(".vex/transaction.json"), &record).unwrap();
-    fs::rename(&live, transaction.join("backup/alpha")).unwrap();
+    fs::rename(
+        &live,
+        transaction
+            .join("backup/pkg_8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"),
+    )
+    .unwrap();
     let dry = vex(&app, &["check", "--dry-run", "--locked"]);
     assert_failure(&dry, "dry-run cannot recover");
     assert!(String::from_utf8_lossy(&dry.stderr).contains("recovery is pending"));
@@ -225,7 +236,9 @@ fn targeted_update_preserves_unrelated_commits_and_fetches() {
     assert_eq!(locked_commit(&app, "beta"), beta_initial);
     assert_eq!(
         git_stdout(
-            &app.join(".vex/deps/beta"),
+            &app.join(
+                ".vex/deps/pkg_f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753"
+            ),
             &["rev-parse", "refs/remotes/origin/master"]
         ),
         beta_initial,
@@ -428,5 +441,66 @@ fn assert_failure(output: &Output, action: &str) {
         "{action} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn checkout(root: &Path, name: &str) -> std::path::PathBuf {
+    let lock = lockfile::decode(&std::fs::read_to_string(root.join("vex.lock")).unwrap()).unwrap();
+    match &lock.package(name).unwrap().source {
+        lockfile::LockedSource::Git { resolved, .. } => root.join(resolved),
+        _ => panic!("expected Git source"),
+    }
+}
+
+#[test]
+fn updating_parent_replaces_and_then_removes_its_transitive_source() {
+    let fixture = TestDir::new();
+    let original = fixture.path().join("original");
+    let replacement = fixture.path().join("replacement");
+    let middle = fixture.path().join("middle");
+    let app = fixture.path().join("app");
+    for (path, message) in [
+        (&original, "original source"),
+        (&replacement, "replacement source"),
+    ] {
+        create_package(path, "leaf", &[]);
+        init_git(path);
+        commit_all(path, message);
+    }
+    create_package(&middle, "middle", &[("leaf", git_url(&original), None)]);
+    init_git(&middle);
+    commit_all(&middle, "original graph");
+    create_package(&app, "app", &[("middle", git_url(&middle), None)]);
+    assert_success(&vex(&app, &["fetch"]), "initial transitive graph");
+    let old = git_stdout(&checkout(&app, "leaf"), &["rev-parse", "HEAD"]);
+    create_package(&middle, "middle", &[("leaf", git_url(&replacement), None)]);
+    commit_all(&middle, "replace transitive source");
+    assert_success(
+        &vex(&app, &["update", "middle"]),
+        "replace transitive source",
+    );
+    let leaf = checkout(&app, "leaf");
+    assert_ne!(git_stdout(&leaf, &["rev-parse", "HEAD"]), old);
+    assert_eq!(
+        git_stdout(&leaf, &["config", "--get", "remote.origin.url"]),
+        git_url(&replacement)
+    );
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "reuse replacement offline",
+    );
+    create_package(&middle, "middle", &[]);
+    commit_all(&middle, "remove transitive source");
+    assert_success(&vex(&app, &["update", "middle"]), "remove transitive edge");
+    let graph = lockfile::decode(&read_lock(&app)).unwrap();
+    assert!(graph.package("leaf").is_none());
+    assert!(graph.package("middle").unwrap().dependencies.is_empty());
+    assert!(
+        leaf.is_dir(),
+        "unreferenced checkouts are retained, without implicit GC"
+    );
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "reuse reduced graph offline",
     );
 }

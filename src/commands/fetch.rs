@@ -1,3 +1,4 @@
+use diagnostic::Error;
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -12,11 +13,10 @@ struct DependencyOptions {
     packages: BTreeSet<String>,
 }
 
-pub fn fetch(args: &[String]) {
-    dependency_command(false, args);
+pub fn fetch(args: &[String]) -> Result<(), Error> {
+    dependency_command(false, args)
 }
-
-pub(super) fn dependency_command(update: bool, args: &[String]) {
+pub(super) fn dependency_command(update: bool, args: &[String]) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!(
             "usage: vex {}",
@@ -26,28 +26,21 @@ pub(super) fn dependency_command(update: bool, args: &[String]) {
                 "fetch [--locked] [--offline]"
             }
         );
-        return;
+        return Ok(());
     }
-    if let Err(err) = run_fetch(update, args) {
-        eprintln!("error: {err}");
-        std::process::exit(1);
+    let options = parse_options(update, args).map_err(Error::usage)?;
+    if update && (options.locked || options.offline) {
+        let option = if options.locked {
+            "--locked"
+        } else {
+            "--offline"
+        };
+        return Err(Error::usage(format!("`{option}` cannot be used with `vex update` because update refreshes Git refs and rewrites vex.lock")));
     }
+    run_fetch(update, options)
 }
 
-fn run_fetch(update: bool, args: &[String]) -> Result<(), String> {
-    let options = parse_options(update, args)?;
-    if update && options.locked {
-        return Err(
-            "`--locked` cannot be used with `vex update` because update rewrites vex.lock"
-                .to_string(),
-        );
-    }
-    if update && options.offline {
-        return Err(
-            "`--offline` cannot be used with `vex update` because update refreshes Git refs"
-                .to_string(),
-        );
-    }
+fn run_fetch(update: bool, options: DependencyOptions) -> Result<(), Error> {
     let started = Instant::now();
     let manifest = Manifest::load()?;
     let update_policy = if update {

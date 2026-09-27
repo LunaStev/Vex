@@ -27,7 +27,7 @@ fn render_package(package: &LockedPackage) -> String {
         } => {
             fields.push(render_field("source", "path"));
             fields.push(render_field("path", requested));
-            fields.push(render_field("resolved", &resolved.to_string_lossy()));
+            fields.push(render_field("resolved", &portable_path(resolved)));
         }
         LockedSource::Git {
             url,
@@ -38,7 +38,7 @@ fn render_package(package: &LockedPackage) -> String {
             resolved,
         } => {
             fields.push(render_field("source", "git"));
-            fields.push(render_field("git", url));
+            fields.push(render_field("git", &source::identity(url)));
             if let Some(branch) = branch {
                 fields.push(render_field("branch", branch));
             }
@@ -49,7 +49,7 @@ fn render_package(package: &LockedPackage) -> String {
                 fields.push(render_field("rev", rev));
             }
             fields.push(render_field("commit", commit));
-            fields.push(render_field("resolved", &resolved.to_string_lossy()));
+            fields.push(render_field("resolved", &portable_path(resolved)));
         }
     }
     let dependencies = package
@@ -69,4 +69,15 @@ fn render_field(key: &str, value: &str) -> String {
 fn escape(value: &str) -> String {
     let quoted = wson::quote(value);
     quoted[1..quoted.len() - 1].to_owned()
+}
+
+fn portable_path(path: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        path.to_string_lossy().replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
 }

@@ -124,8 +124,25 @@ fn compiler_source_protection_survives_parent_death() {
         .command(&["fetch", "--locked", "--offline"])
         .spawn()
         .unwrap();
-    wait_for_lock(&mut writer);
-    compiler.write_all(&[1]).unwrap();
+    #[cfg(unix)]
+    {
+        wait_for_lock(&mut writer);
+        compiler.write_all(&[1]).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // Parent death closes the Job Object and terminates the compiler tree.
+        // Its inherited project lease closes with it, so a writer can proceed.
+        match compiler.read(&mut [0]) {
+            Ok(0) => (),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            result => panic!("terminated compiler retained its socket: {result:?}"),
+        }
+    }
     finish(&mut writer);
     assert_eq!(
         fs::read_to_string(f.root.join("vex.lock")).unwrap(),
@@ -218,4 +235,292 @@ fn rejected_dependency_preflight_does_not_create_target() {
             .success());
         assert!(!f.root.join("target").exists());
     }
+}
+
+#[test]
+fn runtime_exit_codes_are_preserved() {
+    let f = Fixture::new();
+    for code in [0, 7, 42, 125] {
+        let output = f
+            .command(&["run", "--locked", "--offline"])
+            .env("VEX_TEST_RUN_EXIT", code.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(code));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_stops_compiler_and_releases_the_project_lease() {
+    let f = Fixture::new();
+    let barrier = Barrier::new();
+    let mut build = f
+        .command(&[
+            "--message-file",
+            "cancel.jsonl",
+            "build",
+            "--locked",
+            "--offline",
+        ])
+        .env("VEX_TEST_COMPILE", barrier.address())
+        .spawn()
+        .unwrap();
+    let mut compiler = barrier.reached();
+    assert!(Command::new("kill")
+        .args(["-TERM", &build.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let code = loop {
+        if let Some(status) = build.try_wait().unwrap() {
+            break status.code();
+        }
+        assert!(Instant::now() < deadline, "cancelled compiler did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(code, Some(130));
+    let events = message_events(&f.root, "cancel.jsonl");
+    assert_eq!(events.last().unwrap()["category"], "cancelled");
+    assert_eq!(events.last().unwrap()["origin"], "vex");
+    assert_eq!(compiler.read(&mut [0]).unwrap(), 0);
+    let mut writer = f
+        .command(&["fetch", "--locked", "--offline"])
+        .spawn()
+        .unwrap();
+    finish(&mut writer);
+}
+
+fn message_events(root: &std::path::Path, name: &str) -> Vec<serde_json::Value> {
+    let events: Vec<serde_json::Value> = fs::read_to_string(root.join(name))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event["schema_version"], 1);
+        assert_eq!(event["sequence"], index + 1);
+    }
+    assert_eq!(events.first().unwrap()["event"], "started");
+    events
+}
+
+#[test]
+fn structured_outcomes_distinguish_vex_from_program_and_preserve_stdio() {
+    let f = Fixture::new();
+    for code in [0, 1, 2, 3, 4, 5, 42, 124, 130] {
+        let report = format!("run-{code}.jsonl");
+        let mut child = f
+            .command(&[
+                "--message-file",
+                &report,
+                "run",
+                "--locked",
+                "--offline",
+                "--",
+                "--message-file",
+                "runtime.jsonl",
+                "--dry-run",
+            ])
+            .env("VEX_TEST_RUN_EXIT", code.to_string())
+            .env("VEX_TEST_ECHO_STDIN", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"hello program\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("PROGRAM_STDIN:hello program"), "{stdout}");
+        assert!(stdout.contains("runtime.jsonl"), "{stdout}");
+        assert!(!stdout.contains("schema_version"), "{stdout}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("PROGRAM_STDERR"));
+        let events = message_events(&f.root, &report);
+        let last = events.last().unwrap();
+        assert_eq!(last["event"], "finished");
+        assert_eq!(last["origin"], "program");
+        assert_eq!(last["category"], "program");
+        assert_eq!(last["exit_code"], code);
+        assert_eq!(last["success"], code == 0);
+        assert!(!f.root.join("runtime.jsonl").exists());
+    }
+}
+
+#[test]
+fn compiler_failures_are_typed_and_missing_compiler_is_environmental() {
+    let f = Fixture::new();
+    for (env_name, value, category, code) in [
+        ("FAKE_SCHEMA", "999", "compiler", 4),
+        ("VEX_TEST_COMPILE_EXIT", "1", "compiler", 4),
+        ("VEX_TEST_COMPILE_EXIT", "3", "environment", 5),
+        (
+            "VEX_WAVEC",
+            "nonexistent-compiler-for-contract-test",
+            "environment",
+            5,
+        ),
+    ] {
+        let report = format!("{env_name}-{value}.jsonl");
+        let output = f
+            .command(&["--message-file", &report, "build", "--locked", "--offline"])
+            .env(env_name, value)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events = message_events(&f.root, &report);
+        assert_eq!(events.last().unwrap()["category"], category);
+        assert_eq!(events.last().unwrap()["origin"], "vex");
+        assert!(events
+            .iter()
+            .any(|e| e["event"] == "diagnostic" && e["category"] == category));
+    }
+}
+
+#[test]
+fn dry_run_validates_message_destination_without_creating_it() {
+    let f = Fixture::new();
+    let lock = fs::read(f.root.join("vex.lock")).unwrap();
+    for mode in ["build", "check", "run"] {
+        let output = f
+            .command(&[
+                "--message-file",
+                "dry.jsonl",
+                mode,
+                "--dry-run",
+                "--locked",
+                "--offline",
+            ])
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+        assert!(!f.root.join("dry.jsonl").exists());
+        assert!(!f.root.join("target").exists());
+        assert_eq!(fs::read(f.root.join("vex.lock")).unwrap(), lock);
+    }
+    fs::write(f.root.join("dry.jsonl"), b"keep").unwrap();
+    for args in [vec!["build", "--dry-run"], vec!["build"]] {
+        let mut full = vec!["--message-file", "dry.jsonl"];
+        full.extend(args);
+        assert_eq!(f.command(&full).output().unwrap().status.code(), Some(5));
+        assert_eq!(fs::read(f.root.join("dry.jsonl")).unwrap(), b"keep");
+    }
+    assert!(!f.root.join("target").exists());
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn message_failure_before_spawn_stops_run_but_after_run_preserves_exit() {
+    let f = Fixture::new();
+    // started=1, compiler=2, running=3, finished=4.
+    for (sequence, expected, ran) in [(1, 5, false), (2, 5, false), (3, 5, false), (4, 42, true)] {
+        let report = format!("fail-{sequence}.jsonl");
+        let output = f
+            .command(&["--message-file", &report, "run", "--locked", "--offline"])
+            .env("VEX_TEST_MESSAGE_FAIL_AT", sequence.to_string())
+            .env("VEX_TEST_RUN_EXIT", "42")
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).contains("FAKE_WAVEC_EXECUTED"),
+            ran
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("message file"));
+        let raw = fs::read_to_string(f.root.join(report)).unwrap();
+        assert!(!raw.lines().any(
+            |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "finished"
+        ));
+    }
+    // Successful programs also retain 0 when final reporting fails.
+    let output = f
+        .command(&[
+            "--message-file",
+            "fail-success.jsonl",
+            "run",
+            "--locked",
+            "--offline",
+        ])
+        .env("VEX_TEST_MESSAGE_FAIL_AT", "4")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn git_timeout_has_a_structured_timeout_outcome() {
+    let f = Fixture::new();
+    let git = f.root.join(if cfg!(windows) { "git.exe" } else { "git" });
+    fs::copy(&f.compiler, git).unwrap();
+    fs::write(
+        f.root.join("vex.ws"),
+        "{name=\"app\",dependencies=[{name=\"dep\",git=\"https://example.invalid/dep\"}]}",
+    )
+    .unwrap();
+    let output = f
+        .command(&["--message-file", "timeout.jsonl", "fetch"])
+        .env("PATH", &f.root)
+        .env("VEX_GIT_TIMEOUT", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = message_events(&f.root, "timeout.jsonl");
+    assert_eq!(events.last().unwrap()["category"], "timeout");
+    assert_eq!(events.last().unwrap()["origin"], "vex");
+    assert!(!events.last().unwrap()["success"].as_bool().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn program_signal_is_distinct_from_vex_cancellation() {
+    let f = Fixture::new();
+    let barrier = Barrier::new();
+    let mut child = f
+        .command(&[
+            "--message-file",
+            "signal.jsonl",
+            "run",
+            "--locked",
+            "--offline",
+        ])
+        .env("VEX_TEST_RUN", barrier.address())
+        .spawn()
+        .unwrap();
+    let mut program = barrier.reached();
+    // The fixture writes its PID while paused, so only the program receives TERM.
+    let pid = fs::read_to_string(f.root.join("program.pid")).unwrap();
+    assert!(Command::new("kill")
+        .args(["-TERM", pid.trim()])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(child.wait().unwrap().code(), Some(143));
+    assert_eq!(program.read(&mut [0]).unwrap(), 0);
+    let events = message_events(&f.root, "signal.jsonl");
+    assert_eq!(events.last().unwrap()["origin"], "program");
+    assert_eq!(events.last().unwrap()["signal"], 15);
+    assert_eq!(events.last().unwrap()["exit_code"], 143);
 }

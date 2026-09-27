@@ -57,12 +57,18 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
     assert_failure(&missing_lock, "locked fetch without a lockfile");
     let missing_lock_stderr = String::from_utf8_lossy(&missing_lock.stderr);
     assert!(missing_lock_stderr.contains("required by `--locked`"));
-    assert!(!app.join(".vex/deps/middle").exists());
+    assert!(!app
+        .join(".vex/deps/pkg_a4888af4e46c129c695ee32775a8c233f113c82e7cd4e6fd3cbb1fda5659f36a")
+        .exists());
 
     let first_fetch = vex(&app, &["fetch"]);
     assert_success(&first_fetch, "initial vex fetch");
-    assert!(app.join(".vex/deps/middle").is_dir());
-    assert!(app.join(".vex/deps/leaf").is_dir());
+    assert!(app
+        .join(".vex/deps/pkg_a4888af4e46c129c695ee32775a8c233f113c82e7cd4e6fd3cbb1fda5659f36a")
+        .is_dir());
+    assert!(app
+        .join(".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b")
+        .is_dir());
     let first_stderr = String::from_utf8_lossy(&first_fetch.stderr);
     assert!(first_stderr.contains("Resolving"), "{first_stderr}");
     assert!(first_stderr.contains("Fetching"), "{first_stderr}");
@@ -88,12 +94,19 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
     );
     assert_eq!(read_lock(&app), first_lock);
     assert_eq!(
-        git_stdout(&app.join(".vex/deps/leaf"), &["rev-parse", "HEAD"]),
+        git_stdout(
+            &app.join(
+                ".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b"
+            ),
+            &["rev-parse", "HEAD"]
+        ),
         leaf_initial
     );
 
-    fs::remove_dir_all(app.join(".vex/deps/leaf"))
-        .expect("managed leaf checkout must be removed for the offline test");
+    fs::remove_dir_all(
+        app.join(".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b"),
+    )
+    .expect("managed leaf checkout must be removed for the offline test");
     let missing_offline = vex(&app, &["fetch", "--locked", "--offline"]);
     assert_failure(&missing_offline, "offline fetch with a missing checkout");
     let missing_offline_stderr = String::from_utf8_lossy(&missing_offline.stderr);
@@ -105,7 +118,12 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
     assert_success(&restored, "online locked fetch restoring a checkout");
     assert_eq!(read_lock(&app), first_lock);
     assert_eq!(
-        git_stdout(&app.join(".vex/deps/leaf"), &["rev-parse", "HEAD"]),
+        git_stdout(
+            &app.join(
+                ".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b"
+            ),
+            &["rev-parse", "HEAD"]
+        ),
         leaf_initial
     );
 
@@ -120,7 +138,12 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
     assert!(!updated_lock.contains(&format!("commit = \"{leaf_initial}\"")));
     assert!(updated_lock.contains("dependencies = [\"leaf\"]"));
     assert_eq!(
-        git_stdout(&app.join(".vex/deps/leaf"), &["rev-parse", "HEAD"]),
+        git_stdout(
+            &app.join(
+                ".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b"
+            ),
+            &["rev-parse", "HEAD"]
+        ),
         leaf_updated
     );
 
@@ -148,7 +171,8 @@ fn dirty_managed_checkouts_are_rejected_without_discarding_changes() {
 
     assert_success(&vex(&app, &["fetch"]), "initial dependency fetch");
     let locked = read_lock(&app);
-    let checkout = app.join(".vex/deps/dep");
+    let checkout =
+        app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e");
     let source = checkout.join("src/lib.wave");
     let untracked = checkout.join("UNTRACKED.wave");
     let original = fs::read_to_string(&source).unwrap();
@@ -217,7 +241,8 @@ fn locked_offline_resolution_rejects_a_transitive_root_name_conflict() {
     assert!(locked.contains(&format!("commit = \"{conflicting_commit}\"")));
     assert!(locked.contains(&format!("commit = \"{middle_commit}\"")));
 
-    let conflicting_checkout = app.join(".vex/deps/app");
+    let conflicting_checkout =
+        app.join(".vex/deps/pkg_a172cedcae47474b615c54d510a5d84a8dea3032e958587430b413538be3f333");
     fs::remove_dir_all(&conflicting_checkout).expect("conflicting checkout must be removed");
     create_package(&app, "app", &[("middle", git_url(&middle), Some("master"))]);
 
@@ -238,7 +263,12 @@ fn locked_offline_resolution_rejects_a_transitive_root_name_conflict() {
     assert_eq!(read_lock(&app), locked);
     assert!(!conflicting_checkout.exists());
     assert_eq!(
-        git_stdout(&app.join(".vex/deps/middle"), &["rev-parse", "HEAD"]),
+        git_stdout(
+            &app.join(
+                ".vex/deps/pkg_a4888af4e46c129c695ee32775a8c233f113c82e7cd4e6fd3cbb1fda5659f36a"
+            ),
+            &["rev-parse", "HEAD"]
+        ),
         middle_commit
     );
 }
@@ -280,7 +310,12 @@ fn git_lock_accepts_uppercase_and_mixed_case_commit_ids_without_recheckout() {
     );
     assert_eq!(read_lock(&app), uppercase_lock);
     assert_eq!(
-        git_stdout(&app.join(".vex/deps/leaf"), &["rev-parse", "HEAD"]),
+        git_stdout(
+            &app.join(
+                ".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b"
+            ),
+            &["rev-parse", "HEAD"]
+        ),
         leaf_commit
     );
 
@@ -311,7 +346,12 @@ fn git_lock_accepts_uppercase_and_mixed_case_commit_ids_without_recheckout() {
     );
     assert_eq!(read_lock(&app), mixed_lock);
     assert_eq!(
-        git_stdout(&app.join(".vex/deps/leaf"), &["rev-parse", "HEAD"]),
+        git_stdout(
+            &app.join(
+                ".vex/deps/pkg_9f91161f43433e49a6de6db680d79f60159f2e4ac9172621a12846428158440b"
+            ),
+            &["rev-parse", "HEAD"]
+        ),
         leaf_commit
     );
 
@@ -333,7 +373,8 @@ fn managed_checkouts_detach_even_when_head_already_matches() {
     let commit = commit_all(&dep, "initial");
     create_package(&app, "app", &[("dep", git_url(&dep), None)]);
     assert_success(&vex(&app, &["fetch"]), "initial fetch");
-    let checkout = app.join(".vex/deps/dep");
+    let checkout =
+        app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e");
     assert_eq!(
         git_stdout(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]),
         "HEAD"
@@ -374,7 +415,7 @@ fn selector_free_updates_follow_changed_remote_default_branches() {
             assert_success(&vex(&app, args), "reuse old default branch lock");
             assert_eq!(read_lock(&app), locked);
             assert_eq!(
-                git_stdout(&app.join(".vex/deps/dep"), &["rev-parse", "HEAD"]),
+                git_stdout(&app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e"), &["rev-parse", "HEAD"]),
                 old
             );
         }
@@ -382,7 +423,7 @@ fn selector_free_updates_follow_changed_remote_default_branches() {
         assert!(read_lock(&app).contains(&new));
         assert_eq!(
             git_stdout(
-                &app.join(".vex/deps/dep"),
+                &app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e"),
                 &["symbolic-ref", "refs/remotes/origin/HEAD"]
             ),
             "refs/remotes/origin/next"
@@ -439,7 +480,7 @@ fn tag_and_exact_revision_selectors_remain_pinned_on_update() {
             assert_success(&vex(&app, args), "reuse explicit selector");
             assert_eq!(read_lock(&app), locked);
             assert_eq!(
-                git_stdout(&app.join(".vex/deps/dep"), &["rev-parse", "HEAD"]),
+                git_stdout(&app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e"), &["rev-parse", "HEAD"]),
                 pinned
             );
             assert!(!read_lock(&app).contains(&moved));
@@ -508,7 +549,7 @@ fn dependency_git_ignores_inherited_repository_context() {
                 assert_success(&output, &format!("environment case {case}: {args:?}"));
             }
             assert_eq!(
-                git_stdout(&app.join(".vex/deps/dep"), &["rev-parse", "HEAD"]),
+                git_stdout(&app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e"), &["rev-parse", "HEAD"]),
                 dep_commit
             );
             assert_eq!(git_stdout(&other, &["rev-parse", "HEAD"]), other_commit);
@@ -572,7 +613,8 @@ fn url_rewrites_preserve_declared_identity_and_reject_invalid_origins() {
     let locked = read_lock(&app);
     assert!(locked.contains(declared));
     assert!(!locked.contains(&git_url(&dep)));
-    let checkout = app.join(".vex/deps/dep");
+    let checkout =
+        app.join(".vex/deps/pkg_8ce3e71ef8635d2bf27913bb680d7f88ad0238ea42c779c4b30f4e587d07da8e");
     for invalid in ["changed", "multiple", "missing"] {
         git_stdout(
             &checkout,
@@ -723,4 +765,233 @@ fn assert_failure(output: &Output, action: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn unchanged_fetch_has_no_transaction_or_backup_growth_and_legacy_migrates_lazily() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    let app = fixture.path().join("app");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    commit_all(&dep, "initial");
+    create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+    assert_success(&vex(&app, &["fetch"]), "initial fetch");
+    let lock = read_lock(&app);
+    let decoded = lockfile::decode(&lock).unwrap();
+    let lockfile::LockedSource::Git { resolved, .. } = &decoded.package("dep").unwrap().source
+    else {
+        panic!()
+    };
+    let encoded = app.join(resolved);
+    let initial_transactions = fs::read_dir(app.join(".vex/transactions")).unwrap().count();
+    let initial_usage = tree_usage(&app.join(".vex"));
+    let index = fs::metadata(encoded.join(".git/index"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    for flags in [
+        &["fetch"][..],
+        &["fetch", "--locked", "--offline"],
+        &["fetch", "--offline"],
+    ] {
+        assert_success(&vex(&app, flags), "reuse exact checkout");
+        assert_eq!(
+            fs::read_dir(app.join(".vex/transactions")).unwrap().count(),
+            initial_transactions
+        );
+        assert_eq!(
+            fs::metadata(encoded.join(".git/index"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            index
+        );
+        assert_eq!(read_lock(&app), lock);
+        assert_eq!(
+            tree_usage(&app.join(".vex")),
+            initial_usage,
+            "unchanged fetch grew managed state"
+        );
+    }
+    let legacy = app.join(".vex/deps/dep");
+    fs::rename(&encoded, &legacy).unwrap();
+    let old = lock.replace(
+        &resolved.to_string_lossy().replace('\\', "/"),
+        ".vex/deps/dep",
+    );
+    fs::write(app.join("vex.lock"), &old).unwrap();
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "legacy locked reuse",
+    );
+    assert_eq!(read_lock(&app), old);
+    assert!(!encoded.exists());
+    assert_success(
+        &vex(&app, &["fetch", "--offline"]),
+        "lazy offline migration",
+    );
+    assert_eq!(read_lock(&app), lock);
+    assert!(encoded.is_dir());
+    assert!(legacy.is_dir(), "legacy source is retained; no implicit GC");
+}
+
+#[test]
+fn sha256_repositories_are_locked_and_reused_offline() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    let app = fixture.path().join("app");
+    create_package(&dep, "dep", &[]);
+    let output = Command::new("git")
+        .args(["init", "--object-format=sha256", "--initial-branch=master"])
+        .current_dir(&dep)
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unknown option") || stderr.contains("unknown hash algorithm"),
+            "{stderr}"
+        );
+        eprintln!("SHA-256 fixture skipped: installed Git lacks SHA-256 support");
+        return;
+    }
+    git_stdout(&dep, &["config", "user.name", "Vex Test"]);
+    git_stdout(&dep, &["config", "user.email", "vex@example.invalid"]);
+    let commit = commit_all(&dep, "initial SHA-256");
+    assert_eq!(commit.len(), 64);
+    create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+    assert_success(&vex(&app, &["fetch"]), "SHA-256 fetch");
+    let initial = read_lock(&app);
+    assert!(initial.contains(&commit));
+    assert_success(
+        &vex(&app, &["fetch", "--offline", "--locked"]),
+        "SHA-256 offline",
+    );
+    assert_eq!(read_lock(&app), initial);
+    fs::write(dep.join("changed"), "revision").unwrap();
+    let updated = commit_all(&dep, "update SHA-256");
+    assert_success(&vex(&app, &["update", "dep"]), "SHA-256 targeted update");
+    assert!(read_lock(&app).contains(&updated));
+}
+
+#[test]
+fn authenticated_declarations_use_user_rewrites_without_storing_or_printing_credentials() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    let app = fixture.path().join("app");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    commit_all(&dep, "initial");
+    let authenticated = "https://vexuser:SYNTHETIC_PASSWORD@example.invalid/repo.git";
+    create_package(&app, "app", &[("dep", authenticated.into(), None)]);
+    let config = fixture.path().join("gitconfig");
+    fs::write(
+        &config,
+        format!(
+            "[url {:?}]\n\tinsteadOf = {}\n",
+            git_url(&dep),
+            authenticated
+        ),
+    )
+    .unwrap();
+    for args in [
+        &["fetch"][..],
+        &["update", "dep"],
+        &["fetch", "--locked", "--offline"],
+        &["info"],
+        &["tree"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .args(args)
+            .current_dir(&app)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .output()
+            .unwrap();
+        assert_success(&output, "credential source operation");
+        for bytes in [&output.stdout, &output.stderr] {
+            assert!(!String::from_utf8_lossy(bytes).contains("SYNTHETIC_PASSWORD"));
+            assert!(!String::from_utf8_lossy(bytes).contains("vexuser"));
+        }
+        let lock = read_lock(&app);
+        assert!(!lock.contains("SYNTHETIC_PASSWORD") && !lock.contains("vexuser"));
+        assert!(lock.contains("https://example.invalid/repo.git"));
+    }
+}
+
+#[test]
+fn checkout_encoding_handles_case_distinct_and_windows_device_names() {
+    let fixture = TestDir::new();
+    let app = fixture.path().join("app");
+    let mut sources = Vec::new();
+    for (index, name) in ["Foo", "foo", "CON"].into_iter().enumerate() {
+        let path = fixture.path().join(format!("remote{index}"));
+        create_package(&path, name, &[]);
+        init_git(&path);
+        commit_all(&path, "initial");
+        sources.push((name, git_url(&path), None));
+    }
+    create_package(&app, "app", &sources);
+    assert_success(&vex(&app, &["fetch"]), "case-distinct checkout publication");
+    let lock = lockfile::decode(&read_lock(&app)).unwrap();
+    let mut names = std::collections::BTreeSet::new();
+    for package in lock.packages {
+        let lockfile::LockedSource::Git { resolved, .. } = package.source else {
+            panic!()
+        };
+        assert!(names.insert(resolved.to_string_lossy().to_ascii_lowercase()));
+        assert!(app.join(resolved).join("src/lib.wave").is_file());
+    }
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "case-distinct offline reuse",
+    );
+}
+
+fn tree_usage(path: &Path) -> (u64, u64) {
+    let mut usage = (0, 0);
+    for entry in fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let metadata = entry.metadata().unwrap();
+        if metadata.is_dir() {
+            let child = tree_usage(&entry.path());
+            usage.0 += child.0;
+            usage.1 += child.1;
+        } else {
+            usage.0 += 1;
+            usage.1 += metadata.len();
+        }
+    }
+    usage
+}
+
+#[test]
+fn missing_revision_is_resolution_but_unavailable_transport_is_environment() {
+    let fixture = TestDir::new();
+    let dep = fixture.path().join("dep");
+    create_package(&dep, "dep", &[]);
+    init_git(&dep);
+    commit_all(&dep, "initial");
+    for (name, url, category, code) in [
+        ("missing_ref", git_url(&dep), "resolution", 3),
+        (
+            "bad_transport",
+            git_url(&fixture.path().join("absent")),
+            "environment",
+            5,
+        ),
+    ] {
+        let app = fixture.path().join(name);
+        create_package(&app, "app", &[("dep", url, Some("does-not-exist"))]);
+        let output = vex(&app, &["--message-file", "report.jsonl", "fetch"]);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = fs::read_to_string(app.join("report.jsonl")).unwrap();
+        let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(last["category"], category);
+    }
 }

@@ -30,6 +30,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
         Some(WsonValue::String(value)) => restore_url_separators(value),
         _ => return Err("manifest field `name` must be a string".to_string()),
     };
+    crate::validate_package_name(&name)?;
     let version = match data.get("version") {
         Some(value) => parse_version_string(value)
             .ok_or_else(|| "manifest field `version` must be a version or string".to_string())?,
@@ -138,6 +139,7 @@ fn parse_dependencies(value: Option<&WsonValue>) -> Result<Vec<Dependency>, Stri
                 DependencySource::Path { path }
             }
             (None, Some(url)) => {
+                let _ = source::identity(&url);
                 let git_ref_count =
                     branch.is_some() as u8 + tag.is_some() as u8 + rev.is_some() as u8;
                 if git_ref_count > 1 {
