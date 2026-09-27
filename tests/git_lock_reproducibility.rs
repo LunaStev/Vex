@@ -1088,7 +1088,11 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
                 .unwrap();
             if !result.status.success() {
                 let stderr = String::from_utf8_lossy(&result.stderr);
-                assert_eq!(result.status.code(), Some(5), "{stderr}");
+                match result.status.code() {
+                    Some(3) => assert!(stderr.contains("has local changes"), "{stderr}"),
+                    Some(5) => {}
+                    other => panic!("unexpected outcome {other:?}: {stderr}"),
+                }
                 assert!(
                     stderr.contains("git config --show-origin --get-all core.longpaths"),
                     "{stderr}"

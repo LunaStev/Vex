@@ -328,10 +328,13 @@ pub(crate) fn reject_dirty_checkout(destination: &Path, name: &str) -> Result<()
         "inspect Git dependency checkout",
     )?;
     if !dirty.is_empty() {
-        return Err(Error::resolution(format!(
+        let message = format!(
             "managed Git dependency `{name}` at `{}` has local changes\nhelp: preserve those changes outside the managed checkout, then restore it and rerun `vex fetch`; Vex will not discard your files",
             destination.display()
-        )));
+        );
+        #[cfg(windows)]
+        let message = format!("{message}\nhelp: if these changes are unexpected, check `git config --show-origin --get-all core.longpaths`; an explicit false setting can make Git for Windows report long paths as missing");
+        return Err(Error::resolution(message));
     }
     Ok(())
 }

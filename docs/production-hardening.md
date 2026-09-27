@@ -35,7 +35,8 @@ supported build/merge contract.
   preserves existing checkout/lockfile state, and asks for a shorter project path.
   This bound does not restrict the length of files inside supported checkouts.
   Git for Windows can cache an explicit `core.longpaths=false` before applying
-  command overrides. If it reports a long-path error, Vex preserves state and
+  command overrides and may report inaccessible long paths as local changes.
+  If it reports a long-path error or unexpected changes, Vex preserves state and
   advises checking `git config --show-origin --get-all core.longpaths`: remove
   the explicit disabling value or enable long paths in the reported config.
   Vex does not rewrite that user configuration.
