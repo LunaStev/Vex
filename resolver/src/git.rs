@@ -314,6 +314,7 @@ pub(crate) fn checkout_commit(
 }
 
 pub(crate) fn reject_dirty_checkout(destination: &Path, name: &str) -> Result<(), Error> {
+    validate_managed_checkout_path(destination)?;
     let dirty = stdout(
         command_in(destination).args([
             "status",
