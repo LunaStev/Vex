@@ -20,6 +20,9 @@ supported build/merge contract.
   keep historical paths. A successful ordinary fetch stages the new layout and
   updates the resolved path; the historical checkout is retained. Invalid
   lockfile destinations are rejected. Source changes clone a fresh candidate.
+  Windows Git invocations enable `core.longpaths` for the command and its Git
+  children so staging and pack paths can exceed MAX_PATH without changing user
+  or repository Git configuration.
 - **Reuse (#146):** a matching source, SHA, clean worktree and detached HEAD can
   be reused without copying, publishing or retaining a new backup. The project
   lease still spans compiler use. Real transitions keep transactional publication.

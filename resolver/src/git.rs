@@ -278,6 +278,11 @@ pub(crate) fn command_in(destination: &Path) -> Command {
 fn command() -> Command {
     let mut command = Command::new("git");
     command.args(["-c", "protocol.ext.allow=never"]);
+    // Canonical checkout names plus transaction staging can exceed MAX_PATH
+    // even in ordinary Windows temp/project directories. Scope the setting to
+    // our commands (including clone's index-pack child), not user Git config.
+    #[cfg(windows)]
+    command.args(["-c", "core.longpaths=true"]);
     // Read-only graph discovery and dry-run status checks must not refresh the
     // live index as a side effect. Explicit checkout/fetch operations still work.
     command.env("GIT_OPTIONAL_LOCKS", "0");
