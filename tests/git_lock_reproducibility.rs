@@ -1002,6 +1002,7 @@ fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
         let fixture = TestDir::new();
         let dep = fixture.path().join("dep");
         create_package(&dep, "dep", &[]);
+        fs::write(dep.join(".gitattributes"), "*.wave text eol=lf\n").unwrap();
         let nested_file = Path::new(
             "src/nested_directory_one_with_a_long_name/nested_directory_two_with_a_long_name/nested_directory_three_with_a_long_name/value.wave",
         );
