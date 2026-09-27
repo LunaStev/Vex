@@ -8,4 +8,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+diagnostic.workspace = true
+source.workspace = true
 wson.workspace = true

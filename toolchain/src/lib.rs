@@ -10,9 +10,16 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+mod artifact;
+pub use artifact::managed_wavec;
+
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-pub fn install_wavec(version: Option<&str>) -> Result<(), String> {
+pub fn install_wavec(version: Option<&str>) -> Result<PathBuf, String> {
+    artifact::install(version)
+}
+
+pub fn install_wavec_script(version: Option<&str>) -> Result<(), String> {
     let installer_args = installer_args(version);
 
     #[cfg(unix)]
@@ -23,6 +30,10 @@ pub fn install_wavec(version: Option<&str>) -> Result<(), String> {
     let result = Err("wavec setup is not supported on this platform".to_string());
 
     result
+}
+
+pub fn validate_version(value: &str) -> Result<(), String> {
+    artifact::version(value).map(|_| ())
 }
 
 pub fn requested_version(version: Option<&str>) -> &str {

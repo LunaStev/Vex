@@ -1,3 +1,4 @@
+use diagnostic::Error;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::{env, fs};
@@ -11,16 +12,9 @@ pub struct Execution {
     args: Vec<String>,
 }
 impl Execution {
-    pub fn execute(self) -> Result<(), String> {
-        let status = Command::new(&self.program)
-            .args(&self.args)
-            .status()
-            .map_err(|e| format!("failed to run `{}`: {e}", self.program))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("program failed [{status}]"))
-        }
+    pub fn execute(self) -> Result<ExitStatus, Error> {
+        process::status(Command::new(&self.program).args(&self.args), None, true)
+            .map_err(|e| Error::environment(format!("failed to run `{}`: {e}", self.program)))
     }
 }
 
@@ -28,7 +22,7 @@ pub fn run_build_with_dry_run(
     args: &[String],
     user_requested_dry_run: bool,
     generation: Option<&Path>,
-) -> Result<Option<Execution>, String> {
+) -> Result<Option<Execution>, Error> {
     let mut dry_run_args = args.to_vec();
     if !contains_dry_run_flag(&dry_run_args) {
         insert_build_flag(&mut dry_run_args, "--dry-run");
@@ -37,37 +31,41 @@ pub fn run_build_with_dry_run(
     let wavec = wavec_path();
     let validation_output = run_wavec_dry_run(&wavec, &dry_run_args)?;
     let plan = plan::validate_dry_run_json_output(&validation_output.stdout, &validation_output.stderr)
-        .map_err(|error| format!("installed wavec is incompatible with Vex: {error}\nhelp: update wavec or set VEX_WAVEC=/path/to/wavec"))?;
+        .map_err(|error| Error::compiler(format!("installed wavec is incompatible with Vex: {error}\nhelp: update wavec or set VEX_WAVEC=/path/to/wavec")))?;
     if !validation_output.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&validation_output.stderr));
     }
     if user_requested_dry_run {
         println!(
             "{}",
-            serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?
+            serde_json::to_string_pretty(&plan).map_err(Error::internal)?
         );
         return Ok(None);
     }
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let is_run = args[..separator].iter().any(|a| a == "--run");
     let execution = if is_run {
-        let generation = generation.ok_or("missing per-run output generation")?;
+        let generation =
+            generation.ok_or_else(|| Error::internal("missing per-run output generation"))?;
         if plan["mode"] != "build+run" || plan["emit"] != "bin" {
-            return Err("run requires a build plan that emits a binary".into());
+            return Err(Error::compiler(
+                "run requires a build plan that emits a binary",
+            ));
         }
         for job in plan["compile"].as_array().unwrap() {
             validate_output_path(Path::new(job["output"].as_str().unwrap()), generation)?;
         }
         let output = plan["link"]["output"]
             .as_str()
-            .ok_or("run plan is missing link.output")?;
+            .ok_or_else(|| Error::compiler("run plan is missing link.output"))?;
         validate_output_path(Path::new(output), generation)?;
         let program = plan["execute"]["program"]
             .as_str()
             .filter(|s| !s.is_empty())
-            .ok_or("run plan is missing execute.program")?
+            .ok_or_else(|| Error::compiler("run plan is missing execute.program"))?
             .to_owned();
-        let run_args = plan::string_array(&plan["execute"]["args"], "execute.args")?;
+        let run_args = plan::string_array(&plan["execute"]["args"], "execute.args")
+            .map_err(Error::compiler)?;
         let expected = if separator < args.len() {
             &args[separator + 1..]
         } else {
@@ -75,14 +73,16 @@ pub fn run_build_with_dry_run(
         };
         if program == output {
             if run_args != expected {
-                return Err("native execution plan changed runtime arguments".into());
+                return Err(Error::compiler(
+                    "native execution plan changed runtime arguments",
+                ));
             }
         } else if !run_args.ends_with(expected)
             || !run_args[..run_args.len() - expected.len()]
                 .iter()
                 .any(|a| a == output)
         {
-            return Err("runner plan does not reference the generated artifact and original runtime arguments".into());
+            return Err(Error::compiler("runner plan does not reference the generated artifact and original runtime arguments"));
         }
         Some((
             Execution {
@@ -94,60 +94,77 @@ pub fn run_build_with_dry_run(
     } else {
         None
     };
-    state::ensure_dir(Path::new("target"))?;
+    state::ensure_dir(Path::new("target")).map_err(Error::environment)?;
     let compile_args: Vec<_> = args[..separator]
         .iter()
         .filter(|a| a.as_str() != "--run")
         .collect();
-    let status = Command::new(&wavec)
-        .args(compile_args)
-        .status()
-        .map_err(|e| format!("failed to execute `{}` build: {e}", wavec.display()))?;
+    let status =
+        process::status(Command::new(&wavec).args(compile_args), None, false).map_err(|e| {
+            Error::environment(format!(
+                "failed to execute `{}` build: {e}",
+                wavec.display()
+            ))
+        })?;
     if !status.success() {
-        return Err(format!("wavec build failed [{}]", classify_exit(status)));
+        return Err(compiler_error(
+            status,
+            format!("wavec build failed [{}]", classify_exit(status)),
+        ));
     }
     if let Some((execution, output)) = execution {
-        state::reject_link(&output)?;
-        let actual = output
-            .canonicalize()
-            .map_err(|e| format!("compiler did not produce {}: {e}", output.display()))?;
+        state::reject_link(&output).map_err(Error::environment)?;
+        let actual = output.canonicalize().map_err(|e| {
+            Error::new(
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    diagnostic::Category::Compiler
+                } else {
+                    diagnostic::Category::Environment
+                },
+                format!("compiler did not produce {}: {e}", output.display()),
+            )
+        })?;
         let generation = generation
             .unwrap()
             .canonicalize()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Error::environment(e.to_string()))?;
         if !actual.starts_with(&generation) || !actual.is_file() {
-            return Err("compiler output escaped the run generation".into());
+            return Err(Error::compiler(
+                "compiler output escaped the run generation",
+            ));
         }
         return Ok(Some(execution));
     }
     Ok(None)
 }
 
-fn validate_output_path(output: &Path, generation: &Path) -> Result<(), String> {
+fn validate_output_path(output: &Path, generation: &Path) -> Result<(), Error> {
     if !output.starts_with(generation)
         || output
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err("link.output must be inside the per-run output generation".into());
+        return Err(Error::compiler(
+            "link.output must be inside the per-run output generation",
+        ));
     }
     Ok(())
 }
 
-pub fn create_run_generation() -> Result<PathBuf, String> {
-    state::ensure_dir(Path::new("target"))?;
+pub fn create_run_generation() -> Result<PathBuf, Error> {
+    state::ensure_dir(Path::new("target")).map_err(Error::environment)?;
     let parent = Path::new("target/.vex-run");
-    state::ensure_dir(parent)?;
+    state::ensure_dir(parent).map_err(Error::environment)?;
     loop {
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| Error::environment(e.to_string()))?
             .as_nanos();
         let path = parent.join(format!("{}-{time}", std::process::id()));
         match fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(Error::environment(e)),
         }
     }
 }
@@ -163,6 +180,16 @@ fn insert_build_flag(args: &mut Vec<String>, flag: &str) {
         args.insert(separator_index, flag.to_string());
     } else {
         args.push(flag.to_string());
+    }
+}
+
+fn compiler_error(status: ExitStatus, message: String) -> Error {
+    // wavec reserves 3 for missing backend tools / environment / IO failures.
+    // Its usage rejection is still a compiler interface failure, not Vex CLI usage.
+    if status.code() == Some(3) {
+        Error::environment(message)
+    } else {
+        Error::compiler(message)
     }
 }
 
@@ -182,22 +209,26 @@ struct DryRunOutput {
     stderr: Vec<u8>,
 }
 
-fn run_wavec_dry_run(wavec: &Path, dry_run_args: &[String]) -> Result<DryRunOutput, String> {
-    let output = Command::new(wavec)
-        .args(dry_run_args)
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to execute `{}`. Install wavec or set VEX_WAVEC=/path/to/wavec: {error}",
-                wavec.display()
-            )
-        })?;
+fn run_wavec_dry_run(wavec: &Path, dry_run_args: &[String]) -> Result<DryRunOutput, Error> {
+    let output = process::output(
+        Command::new(wavec).args(dry_run_args),
+        std::time::Duration::from_secs(60),
+    )
+    .map_err(|error| {
+        Error::environment(format!(
+            "failed to execute `{}`. Install wavec or set VEX_WAVEC=/path/to/wavec: {error}",
+            wavec.display()
+        ))
+    })?;
     if !output.status.success() {
-        return Err(format!(
-            "wavec dry-run failed using `{}` [{}]: {}",
-            wavec.display(),
-            classify_exit(output.status),
-            combined_output(&output.stdout, &output.stderr)
+        return Err(compiler_error(
+            output.status,
+            format!(
+                "wavec dry-run failed using `{}` [{}]: {}",
+                wavec.display(),
+                classify_exit(output.status),
+                combined_output(&output.stdout, &output.stderr)
+            ),
         ));
     }
     Ok(DryRunOutput {
@@ -221,5 +252,15 @@ fn wavec_path() -> PathBuf {
     env::var_os("VEX_WAVEC")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("wavec"))
+        .unwrap_or_else(|| {
+            let filename = if cfg!(windows) { "wavec.exe" } else { "wavec" };
+            let on_path = env::var_os("PATH").is_some_and(|path| {
+                env::split_paths(&path).any(|directory| directory.join(filename).is_file())
+            });
+            if on_path {
+                PathBuf::from(filename)
+            } else {
+                toolchain::managed_wavec().unwrap_or_else(|| PathBuf::from(filename))
+            }
+        })
 }

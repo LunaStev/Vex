@@ -16,12 +16,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
           rustup default 1.96.0
+
+      - name: Audit locked dependencies
+        run: python3 tools/dependency_audit.py
 
       - name: Check formatting
         run: cargo fmt --check
@@ -34,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
         run: |
@@ -42,7 +45,7 @@ jobs:
           rustup default 1.96.0
 
       - name: Install Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.11"
 
@@ -75,7 +78,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
         run: |
@@ -83,7 +86,7 @@ jobs:
           rustup default 1.96.0
 
       - name: Install Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.11"
 
@@ -103,7 +106,7 @@ jobs:
       CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install RISC-V system tools
         run: |

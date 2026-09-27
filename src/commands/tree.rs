@@ -1,3 +1,4 @@
+use diagnostic::Error;
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -16,19 +17,15 @@ struct TreeOptions {
     offline: bool,
 }
 
-pub fn tree(args: &[String]) {
+pub fn tree(args: &[String]) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!("usage: vex tree [--locked] [--offline]");
-        return;
+        return Ok(());
     }
-    if let Err(error) = run_tree(args) {
-        eprintln!("error: {error}");
-        std::process::exit(1);
-    }
+    run_tree(parse_options(args).map_err(Error::usage)?)
 }
 
-fn run_tree(args: &[String]) -> Result<(), String> {
-    let options = parse_options(args)?;
+fn run_tree(options: TreeOptions) -> Result<(), Error> {
     let manifest = Manifest::load()?;
     let root_dependencies = manifest
         .dependencies
@@ -52,7 +49,8 @@ fn run_tree(args: &[String]) -> Result<(), String> {
             &manifest.version,
             &root_dependencies,
             resolution.packages(),
-        )?
+        )
+        .map_err(Error::internal)?
     );
     Ok(())
 }
@@ -173,8 +171,10 @@ fn package_label(package: &LockedPackage) -> String {
                 .unwrap_or_default();
             let short_commit = &commit[..commit.len().min(7)];
             format!(
-                "{} v{} (git {url}{reference} @ {short_commit})",
-                package.name, package.version
+                "{} v{} (git {}{reference} @ {short_commit})",
+                package.name,
+                package.version,
+                source::identity(url)
             )
         }
     }

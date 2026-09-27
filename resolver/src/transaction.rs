@@ -16,6 +16,18 @@ pub(crate) struct Transaction {
 }
 
 impl Transaction {
+    pub fn path(&self, name: &str) -> PathBuf {
+        if self.names.borrow().contains(name) {
+            self.stage.join(name)
+        } else {
+            self.root.join(".vex/deps").join(name)
+        }
+    }
+
+    pub fn prepare_from(&self, name: &str, previous: &str) -> Result<(), String> {
+        self.prepare_source(name, Some(previous))
+    }
+
     pub fn new(root: &Path) -> Result<Self, String> {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -35,6 +47,14 @@ impl Transaction {
     }
 
     pub fn prepare(&self, name: &str) -> Result<(), String> {
+        self.prepare_source(name, Some(name))
+    }
+
+    pub fn prepare_fresh(&self, name: &str) -> Result<(), String> {
+        self.prepare_source(name, None)
+    }
+
+    fn prepare_source(&self, name: &str, previous: Option<&str>) -> Result<(), String> {
         if self.names.borrow().contains(name) {
             return Ok(());
         }
@@ -45,16 +65,19 @@ impl Transaction {
             fs::create_dir(&self.stage).map_err(err)?;
             fs::create_dir(self.directory.join("backup")).map_err(err)?;
         }
-        let live = self.root.join(".vex/deps").join(name);
-        if fs::symlink_metadata(&live).is_ok() {
-            crate::paths::validate_managed_checkout_path(&live)?;
+        if let Some(previous) = previous {
+            valid_name(previous)?;
+        }
+        let live = self.root.join(".vex/deps").join(previous.unwrap_or(name));
+        if previous.is_some() && fs::symlink_metadata(&live).is_ok() {
+            crate::paths::validate_managed_checkout_path(&live).map_err(|e| e.to_string())?;
             if !live.join(".git").is_dir() {
                 return Err(format!(
                     "managed dependency path `{}` exists but is not a Git checkout",
                     live.display()
                 ));
             }
-            crate::git::reject_dirty_checkout(&live, name)?;
+            crate::git::reject_dirty_checkout(&live, name).map_err(|e| e.to_string())?;
             reject_git_metadata_links(&live.join(".git"))?;
             copy_tree(&live, &self.stage.join(name))?;
         }
@@ -77,7 +100,7 @@ impl Transaction {
             let live = live_root.join(name);
             state::reject_link(&live)?;
             if live.exists() {
-                crate::git::reject_dirty_checkout(&live, name)?;
+                crate::git::reject_dirty_checkout(&live, name).map_err(|e| e.to_string())?;
             }
             if !self.stage.join(name).is_dir() {
                 return Err(format!("candidate checkout `{name}` is missing"));
@@ -98,8 +121,10 @@ impl Transaction {
         ] {
             state::sync_dir(directory).map_err(err)?;
         }
-        let old_lock = read_optional(&self.root.join("vex.lock"))?;
-        let record = json!({"version":1,"directory":self.directory.file_name().unwrap().to_str().unwrap(),
+        let old_lock = read_optional(&self.root.join("vex.lock"))?
+            .as_deref()
+            .map(fingerprint);
+        let record = json!({"version":2,"directory":self.directory.file_name().unwrap().to_str().unwrap(),
             "entries":entries,"old_lock":old_lock,"new_lock":new_lock,"committed":false});
         self.journaled = true;
         atomic_text(&journal(&self.root), &record.to_string())?;
@@ -157,7 +182,7 @@ pub(crate) fn recover(root: &Path, dry_run: bool) -> Result<(), String> {
     }
     let record: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("invalid recovery journal: {e}; preserve .vex for manual recovery"))?;
-    if record["version"].as_u64() != Some(1) {
+    if !matches!(record["version"].as_u64(), Some(1 | 2)) {
         return Err("unsupported recovery journal version".into());
     }
     let id = record["directory"]
@@ -182,11 +207,24 @@ pub(crate) fn recover(root: &Path, dry_run: bool) -> Result<(), String> {
     let committed_flag = record["committed"]
         .as_bool()
         .ok_or("missing journal commit flag")?;
-    let committed = committed_flag || (new.is_some() && new != old && current.as_deref() == new);
-    if current.as_deref() != old && current.as_deref() != new.or(old) {
+    let current_identity = if record["version"].as_u64() == Some(2) {
+        current.as_deref().map(fingerprint)
+    } else {
+        current.clone()
+    };
+    let old_matches = current_identity.as_deref() == old;
+    let new_matches = new.is_some() && current.as_deref() == new;
+    let committed = committed_flag || (!old_matches && new_matches);
+    if !old_matches && !new_matches {
         return Err("vex.lock differs from both transaction states; preserve .vex and restore the expected lockfile before recovery".into());
     }
-    if committed_flag && current.as_deref() != new.or(old) {
+    if committed_flag
+        && !(if new.is_some() {
+            new_matches
+        } else {
+            old_matches
+        })
+    {
         return Err("committed journal disagrees with vex.lock".into());
     }
     let entries = record["entries"]
@@ -243,7 +281,7 @@ pub(crate) fn recover(root: &Path, dry_run: bool) -> Result<(), String> {
             let stage = directory.join("deps").join(name);
             if backup.exists() {
                 if live.exists() {
-                    crate::git::reject_dirty_checkout(&live, name)?;
+                    crate::git::reject_dirty_checkout(&live, name).map_err(|e| e.to_string())?;
                     // Preserve the failed candidate rather than deleting a tree
                     // whose contents may have been inspected by the user.
                     if stage.exists() {
@@ -253,7 +291,7 @@ pub(crate) fn recover(root: &Path, dry_run: bool) -> Result<(), String> {
                 }
                 rename(&backup, &live)?;
             } else if !entry["had_old"].as_bool().unwrap() && live.exists() && !stage.exists() {
-                crate::git::reject_dirty_checkout(&live, name)?;
+                crate::git::reject_dirty_checkout(&live, name).map_err(|e| e.to_string())?;
                 rename(&live, &stage)?;
             }
         }
@@ -390,6 +428,9 @@ fn sync_file(path: &Path) -> Result<(), String> {
         let original = fs::metadata(path).map_err(err)?.permissions();
         if original.readonly() {
             let mut writable = original.clone();
+            // Windows clears FILE_ATTRIBUTE_READONLY, not Unix mode bits.
+            // Restore the original attribute below after FlushFileBuffers.
+            #[allow(clippy::permissions_set_readonly_false)]
             writable.set_readonly(false);
             fs::set_permissions(path, writable).map_err(err)?;
         }
@@ -402,6 +443,11 @@ fn sync_file(path: &Path) -> Result<(), String> {
     }
 }
 
+fn fingerprint(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
 #[cfg(test)]
 thread_local! { static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
 fn fault(_point: &str) -> Result<(), String> {
@@ -412,7 +458,7 @@ fn fault(_point: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn reject_git_metadata_links(path: &Path) -> Result<(), String> {
+pub(crate) fn reject_git_metadata_links(path: &Path) -> Result<(), String> {
     state::reject_link(path)?;
     if path.is_dir() {
         for entry in fs::read_dir(path).map_err(err)? {

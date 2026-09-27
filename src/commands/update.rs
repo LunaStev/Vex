@@ -1,5 +1,3 @@
-use super::fetch::dependency_command;
-
-pub fn update(args: &[String]) {
-    dependency_command(true, args);
+pub fn update(args: &[String]) -> Result<(), diagnostic::Error> {
+    super::fetch::dependency_command(true, args)
 }

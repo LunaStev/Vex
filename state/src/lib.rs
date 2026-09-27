@@ -4,6 +4,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod scaffold;
+pub use scaffold::initialize;
+
 #[derive(Debug)]
 pub struct Guard {
     _file: File,
@@ -12,6 +15,7 @@ pub struct Guard {
 
 impl Guard {
     pub fn acquire(shared: bool, mut waiting: impl FnMut(&str, String)) -> Result<Self, String> {
+        process::install_handlers()?;
         let root = std::env::current_dir()
             .and_then(|p| p.canonicalize())
             .map_err(|e| e.to_string())?;
@@ -27,7 +31,9 @@ impl Guard {
             return Err("project coordination path must be a regular file".into());
         }
         inherit(&file).map_err(|e| format!("cannot protect compiler/Git child lifetime: {e}"))?;
-        Ok(Self { _file: file, root })
+        let guard = Self { _file: file, root };
+        scaffold::recover(guard.root(), shared)?;
+        Ok(guard)
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -83,22 +89,29 @@ fn acquire_file(path: &Path, shared: bool, waiting: impl FnOnce()) -> io::Result
         .truncate(false)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
-    let result = if shared {
-        file.try_lock_shared()
-    } else {
-        file.try_lock()
-    };
-    match result {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => {
-            waiting();
-            if shared {
-                file.lock_shared()?;
-            } else {
-                file.lock()?;
-            }
+    let mut waiting = Some(waiting);
+    loop {
+        if process::cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "operation cancelled",
+            ));
         }
-        Err(fs::TryLockError::Error(e)) => return Err(e),
+        let result = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match result {
+            Ok(()) => break,
+            Err(fs::TryLockError::WouldBlock) => {
+                if let Some(waiting) = waiting.take() {
+                    waiting();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
     }
     Ok(file)
 }
@@ -108,6 +121,12 @@ fn acquire_file(path: &Path, shared: bool, waiting: impl FnOnce()) -> io::Result
     use std::os::windows::fs::OpenOptionsExt;
     let mut waiting = Some(waiting);
     loop {
+        if process::cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "operation cancelled",
+            ));
+        }
         let result = OpenOptions::new()
             .read(true)
             .write(!shared)

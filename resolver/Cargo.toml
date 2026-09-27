@@ -8,7 +8,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+diagnostic.workspace = true
+process.workspace = true
+source.workspace = true
 manifest.workspace = true
 lockfile.workspace = true
 state.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"

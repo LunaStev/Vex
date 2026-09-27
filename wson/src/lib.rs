@@ -3,7 +3,28 @@
 //! decodes JSON escapes. The upstream parser is used for scalar literals only.
 pub use wson_rs::{WsonMap, WsonValue};
 
+/// Both file reads and in-memory parser entry points enforce this bound.
+pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+
+pub fn read_document(path: &std::path::Path) -> Result<String, std::io::Error> {
+    use std::io::Read;
+    let mut raw = String::new();
+    std::fs::File::open(path)?
+        .take(MAX_DOCUMENT_BYTES as u64 + 1)
+        .read_to_string(&mut raw)?;
+    if raw.len() > MAX_DOCUMENT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "WSON document exceeds 8 MiB",
+        ));
+    }
+    Ok(raw)
+}
+
 pub fn loads(raw: &str, version_key: &str, escaped_version: i64) -> Result<WsonMap, String> {
+    if raw.len() > MAX_DOCUMENT_BYTES {
+        return Err("WSON document exceeds 8 MiB".into());
+    }
     let mut parser = Parser {
         raw,
         pos: 0,
@@ -173,6 +194,21 @@ impl Parser<'_> {
                     return Err(self.error("expected value"));
                 }
                 let atom = &self.raw[start..self.pos];
+                if atom.len() > 1024 || atom.contains(['{', '[', '\"', '=', ':', '\\']) {
+                    return Err(self.error("invalid or oversized scalar"));
+                }
+                if atom.contains('.')
+                    && atom
+                        .split('.')
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    let parts = atom
+                        .split('.')
+                        .map(str::parse::<u32>)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| self.error("version component exceeds u32"))?;
+                    return Ok(WsonValue::Version(parts));
+                }
                 let mut result = wson_rs::loads(&format!("{{value={atom}}}"))
                     .map_err(|_| self.error(&format!("invalid scalar `{atom}`")))?;
                 result
@@ -215,5 +251,45 @@ mod tests {
         assert!(loads("{value=1,value=2}", "format", 2)
             .unwrap_err()
             .contains("duplicate"));
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    #[test]
+    fn bounded_mutation_corpus_never_panics() {
+        let seeds = [
+            r#"{format=2,name="app",dependencies=[{name="dep",git="https://host/a?x=1#y"}]}"#,
+            r#"{version=3,package=[],value="\uD800"}"#,
+            r#"{format=1,value="C:\legacy\new"}"#,
+            "{a=[[[[[[[[[[[[]]]]]]]]]]]],b=999999999999999999999999999999999999999999}",
+            "{/* comment */a=1.0.0,b=NaN,c=inf}",
+        ];
+        let tokens = [
+            "{", "}", "[", "]", "\\", "\"", "/*", "*/", ",", "=", "\0", "한", "💥", "#", "\n",
+        ];
+        let mut rng = 0x456abcd123u64;
+        for seed in seeds {
+            for _ in 0..2000 {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                let mut input = seed.to_string();
+                let index = (rng as usize) % (input.len() + 1);
+                input.insert_str(index, tokens[(rng >> 32) as usize % tokens.len()]);
+                let _ = loads(&input, "format", 2);
+                let _ = loads(&input, "version", 3);
+            }
+        }
+    }
+    #[test]
+    fn document_and_nesting_limits_are_enforced() {
+        assert!(loads("{version=1.999999999999999999999.3}", "format", 2)
+            .unwrap_err()
+            .contains("version component"));
+        assert!(loads(&" ".repeat(MAX_DOCUMENT_BYTES + 1), "format", 2).is_err());
+        let deep = format!("{{a={}0{}}}", "[".repeat(129), "]".repeat(129));
+        assert!(loads(&deep, "format", 2).unwrap_err().contains("nesting"));
     }
 }

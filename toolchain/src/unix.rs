@@ -7,11 +7,22 @@ const INSTALLER_URL: &str = "https://wave-lang.dev/install.sh";
 
 pub(crate) fn install(args: &[String]) -> Result<(), String> {
     let (script, output) = create_installer_file("sh")?;
-    let status = Command::new("curl")
-        .args(["-fsSL", INSTALLER_URL])
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(output))
-        .status();
+    let status = process::status(
+        Command::new("curl")
+            .args([
+                "--disable",
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                INSTALLER_URL,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output)),
+        Some(std::time::Duration::from_secs(300)),
+        false,
+    );
     let status = match status {
         Ok(status) => status,
         Err(error) => {
@@ -24,24 +35,28 @@ pub(crate) fn install(args: &[String]) -> Result<(), String> {
         return Err(format!("failed to download wavec installer: {status}"));
     }
 
-    let mut child = match Command::new("bash")
-        .arg(&script)
-        .args(args)
-        .stdin(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
+    let result = process::status(
+        Command::new("bash")
+            .arg(&script)
+            .args(args)
+            .stdin(Stdio::null()),
+        Some(std::time::Duration::from_secs(900)),
+        false,
+    );
+    let cleanup = remove_installer(&script);
+    let status = match result {
+        Ok(status) => status,
         Err(error) => {
-            let _ = fs::remove_file(&script);
-            return Err(format!("failed to start wavec installer: {error}"));
+            return Err(format!(
+                "wavec installer failed: {error}; cleanup: {cleanup:?}"
+            ))
         }
     };
-    let status = child.wait();
-    remove_installer(&script)?;
-    let status = status.map_err(|error| format!("failed to wait for wavec installer: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("wavec installation failed with status: {status}"))
+    if !status.success() {
+        return Err(format!(
+            "wavec installer failed: {status}; cleanup: {cleanup:?}"
+        ));
     }
+    cleanup?;
+    Ok(())
 }

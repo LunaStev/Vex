@@ -1,6 +1,9 @@
 use serde_json::Value;
 
 pub(crate) fn validate_dry_run_json_output(stdout: &[u8], _stderr: &[u8]) -> Result<Value, String> {
+    if stdout.len() > 8 * 1024 * 1024 {
+        return Err("compiler plan exceeds 8 MiB".into());
+    }
     let text = std::str::from_utf8(stdout).map_err(|_| "wavec plan stdout is not UTF-8")?;
     let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map_err(|e| format!("expected one JSON plan document on stdout: {e}"))?;

@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools::build-utils"]
 publish = false
 
 [workspace]
-members = [".", "manifest", "lockfile", "resolver", "compiler", "toolchain", "wson", "state"]
+members = ["diagnostic", ".", "manifest", "lockfile", "resolver", "compiler", "toolchain", "wson", "state", "source", "process"]
 resolver = "2"
 
 [workspace.package]
@@ -23,6 +23,9 @@ license = "MPL-2.0"
 repository = "https://github.com/wavefnd/Vex"
 
 [workspace.dependencies]
+diagnostic = { path = "diagnostic" }
+process = { path = "process" }
+source = { path = "source" }
 manifest = { path = "manifest" }
 lockfile = { path = "lockfile" }
 resolver = { path = "resolver" }
@@ -34,6 +37,10 @@ state = { path = "state" }
 serde_json = "1.0"
 
 [dependencies]
+diagnostic.workspace = true
+serde_json.workspace = true
+process.workspace = true
+source.workspace = true
 colorex = "0.1.1"
 manifest.workspace = true
 lockfile.workspace = true

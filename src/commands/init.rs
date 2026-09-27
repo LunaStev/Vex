@@ -1,28 +1,20 @@
+use diagnostic::Error;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
-use lockfile::{write_lockfile, Lockfile};
-use manifest::{render_new_manifest, Manifest, MANIFEST_FILE};
+use lockfile::Lockfile;
+use manifest::{render_new_manifest, validate_package_name, MANIFEST_FILE};
 
-pub fn init(args: &[String]) {
-    let is_lib = match parse_options(args) {
-        Ok(Some(is_lib)) => is_lib,
-        Ok(None) => {
+pub fn init(args: &[String]) -> Result<(), Error> {
+    let is_lib = match parse_options(args).map_err(Error::usage)? {
+        Some(value) => value,
+        None => {
             println!("usage: vex init [--lib]");
-            return;
-        }
-        Err(err) => {
-            eprintln!("error: {err}");
-            eprintln!("usage: vex init [--lib]");
-            std::process::exit(2);
+            return Ok(());
         }
     };
-    if let Err(err) = run_init(is_lib) {
-        eprintln!("error: {err}");
-        std::process::exit(1);
-    }
+    run_init(is_lib)
 }
 
 fn parse_options(args: &[String]) -> Result<Option<bool>, String> {
@@ -38,67 +30,36 @@ fn parse_options(args: &[String]) -> Result<Option<bool>, String> {
     Ok(Some(is_lib))
 }
 
-fn run_init(is_lib: bool) -> Result<(), String> {
-    let manifest_path = Path::new(MANIFEST_FILE);
-    let src_dir = Path::new("src");
-
-    if manifest_path.exists() {
-        return Err(format!("`{MANIFEST_FILE}` already exists."));
-    }
-
-    let _guard = state::Guard::acquire(false, crate::ui::status)?;
-    resolver::recover_project(&_guard, false)?;
-    if manifest_path.exists() {
-        return Err(format!("`{MANIFEST_FILE}` already exists."));
-    }
-
-    let project_name = env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "wave_project".to_string());
-
+fn run_init(is_lib: bool) -> Result<(), Error> {
+    let directory = env::current_dir()?;
+    let project_name = directory
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error::resolution("project directory must have a UTF-8 package name"))?;
+    validate_package_name(project_name).map_err(Error::resolution)?;
+    // Validate the name before creating even the coordination directory.
+    let guard = state::Guard::acquire(false, crate::ui::status).map_err(Error::environment)?;
+    resolver::recover_project(&guard, false)?;
     let author = get_username().unwrap_or_else(|| "unknown".to_string());
-
-    fs::create_dir_all(src_dir).map_err(|e| format!("failed to create src/: {e}"))?;
-
     let source_file = if is_lib { "lib.wave" } else { "main.wave" };
-    let source_path = src_dir.join(source_file);
-    if source_path.exists() {
-        return Err(format!(
-            "`{}` already exists.",
-            source_path.to_string_lossy()
-        ));
-    }
-
+    let source_name = format!("src/{source_file}");
     let source_template = if is_lib {
         "pub fun greet() {\n    println(\"Hello from library\");\n}\n"
     } else {
         "fun main() {\n    println(\"Hello World\");\n}\n"
     };
-
-    fs::write(&source_path, source_template)
-        .map_err(|e| format!("failed to write `{}`: {e}", source_path.to_string_lossy()))?;
-
-    let manifest_text = render_new_manifest(&project_name, &author, is_lib);
-    fs::write(manifest_path, manifest_text)
-        .map_err(|e| format!("failed to write `{MANIFEST_FILE}`: {e}"))?;
-
-    let _manifest = Manifest::load()?;
-    write_lockfile(&Lockfile::empty())?;
-
-    if !Path::new(".gitignore").exists() {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(".gitignore")
-        {
-            Ok(mut file) => file
-                .write_all(b"/target/\n/.vex/\n")
-                .map_err(|e| format!("failed to write `.gitignore`: {e}"))?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("failed to create `.gitignore`: {error}")),
-        }
+    let mut files = vec![
+        (source_name.as_str(), source_template.to_string()),
+        ("vex.lock", lockfile::encode(Lockfile::empty())),
+    ];
+    if fs::symlink_metadata(Path::new(".gitignore")).is_err() {
+        files.push((".gitignore", "/target/\n/.vex/\n".into()));
     }
+    files.push((
+        MANIFEST_FILE,
+        render_new_manifest(project_name, &author, is_lib),
+    ));
+    state::initialize(&guard, &files).map_err(Error::environment)?;
 
     println!("initialized Wave project");
     println!("created {MANIFEST_FILE}, vex.lock, and src/{source_file}");

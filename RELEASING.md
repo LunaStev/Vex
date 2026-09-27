@@ -45,9 +45,14 @@ checklist before tagging:
    committed lockfile with:
 
    ```sh
-   osv-scanner scan source --lockfile Cargo.lock
+   python3 tools/dependency_audit.py
    cargo metadata --locked --format-version 1
    ```
+
+   Audit exit code 1 means unsuppressed findings; 2 means the audit could not
+   complete. Neither is a clean audit. Exceptions in audit-exceptions.json
+   require an exact advisory/package/version, owner, reason and expiry within
+   90 days. Do not renew an exception without reviewing the underlying finding.
 
    When Cargo.lock changes, regenerate and review the bundled third-party
    notices from all locked package sources (including platform-specific crates):
@@ -131,7 +136,9 @@ The workflow packages these targets:
 Each target is built and smoke-tested on its native runner, except RISC-V,
 which is cross-built and executed with QEMU. The final job runs only after the
 complete matrix succeeds. It rejects missing or unexpected archives, writes a
-single `SHA256SUMS`, and creates a GitHub Release.
+single `SHA256SUMS`, verifies each build attestation against this repository,
+the release workflow and exact source/signer commit, and creates a GitHub Release.
+Build jobs generate provenance before uploading the archives.
 
 Download the draft assets into an empty directory and verify them:
 
@@ -139,6 +146,13 @@ Download the draft assets into an empty directory and verify them:
 gh release download "v$release_version" --repo wavefnd/Vex --dir "vex-v$release_version"
 cd "vex-v$release_version"
 sha256sum --check SHA256SUMS
+# Set release_commit to the reviewed master commit used for this release.
+for archive in vex-*.tar.gz vex-*.zip; do
+  gh attestation verify "$archive" --repo wavefnd/Vex \
+    --signer-workflow wavefnd/Vex/.github/workflows/release.yml \
+    --source-ref refs/heads/master --source-digest "$release_commit" \
+    --signer-digest "$release_commit" --deny-self-hosted-runners
+done
 ```
 
 Extract at least one native archive in a clean environment and run

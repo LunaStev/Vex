@@ -1,3 +1,4 @@
+use diagnostic::Error;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -13,7 +14,6 @@ pub(crate) struct Resolver<'a> {
     options: ResolveOptions,
     preflight: bool,
     root: PathBuf,
-    dep_root: PathBuf,
     transaction: Option<&'a Transaction>,
     root_name: String,
     root_manifest: PathBuf,
@@ -44,7 +44,7 @@ impl<'a> Resolver<'a> {
     pub(crate) fn new(
         options: ResolveOptions,
         root: PathBuf,
-        dep_root: PathBuf,
+        _dep_root: PathBuf,
         transaction: Option<&'a Transaction>,
         root_name: String,
         root_manifest: PathBuf,
@@ -55,7 +55,6 @@ impl<'a> Resolver<'a> {
             options,
             preflight: false,
             root,
-            dep_root,
             transaction,
             root_name,
             root_manifest,
@@ -76,7 +75,7 @@ impl<'a> Resolver<'a> {
         path.to_owned()
     }
 
-    fn resolve_path(&self, path: &str, parent: &Path) -> Result<PathBuf, String> {
+    fn resolve_path(&self, path: &str, parent: &Path) -> Result<PathBuf, Error> {
         let parent = self.logical(parent);
         let candidate = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -96,10 +95,13 @@ impl<'a> Resolver<'a> {
         if let Some(transaction) = self.transaction {
             if let Ok(suffix) = lexical.strip_prefix(self.root.join(".vex/deps")) {
                 if let Some(std::path::Component::Normal(name)) = suffix.components().next() {
-                    transaction.prepare(name.to_str().ok_or("non-UTF-8 managed package name")?)?;
+                    let name = name
+                        .to_str()
+                        .ok_or_else(|| Error::resolution("non-UTF-8 managed package name"))?;
+                    let tail: PathBuf = suffix.components().skip(1).collect();
+                    let physical = transaction.path(name).join(tail);
+                    return Ok(physical.canonicalize().unwrap_or(physical));
                 }
-                let physical = transaction.stage.join(suffix);
-                return Ok(physical.canonicalize().unwrap_or(physical));
             }
         }
         Ok(resolve_path(path, &parent))
@@ -113,7 +115,7 @@ impl<'a> Resolver<'a> {
         self.packages.into_values().collect()
     }
 
-    pub(crate) fn validate_selected_packages(&self) -> Result<(), String> {
+    pub(crate) fn validate_selected_packages(&self) -> Result<(), Error> {
         let UpdatePolicy::UpdateSelected(selected) = &self.options.update else {
             return Ok(());
         };
@@ -149,24 +151,27 @@ impl<'a> Resolver<'a> {
         } else {
             available.into_iter().collect::<Vec<_>>().join(", ")
         };
-        Err(format!(
+        Err(Error::resolution(format!(
             "cannot update {package_label} {requested}: one or more requested names are not Git dependencies in the current graph\nhelp: available Git packages: {available}\nhelp: run `vex update <package>...` using one or more available package names"
-        ))
+        )))
     }
 
     pub(crate) fn resolve_manifest_dependencies(
         &mut self,
         manifest: &Manifest,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, Error> {
         let mut dependencies = Vec::new();
         for dependency in &manifest.dependencies {
             self.resolve_dependency(dependency, &manifest.source_path)
                 .map_err(|error| {
-                    format!(
-                        "failed to resolve dependency `{}` from `{}`\n\nCaused by:\n  {}",
-                        dependency.name,
-                        manifest.source_path.display(),
-                        indent_lines(&error)
+                    Error::new(
+                        error.category,
+                        format!(
+                            "failed to resolve dependency `{}` from `{}`\n\nCaused by:\n  {}",
+                            dependency.name,
+                            manifest.source_path.display(),
+                            indent_lines(&error)
+                        ),
                     )
                 })?;
             dependencies.push(dependency.name.clone());
@@ -179,7 +184,7 @@ impl<'a> Resolver<'a> {
         &mut self,
         dependency: &Dependency,
         parent_manifest: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         if dependency.name == self.root_name {
             let source = match &dependency.source {
                 DependencySource::Path { path } => self
@@ -188,18 +193,18 @@ impl<'a> Resolver<'a> {
                     .into_owned(),
                 DependencySource::Git { url, .. } => url.clone(),
             };
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "dependency `{}` declared in `{}` from source `{source}` reuses root package name `{}` from `{}`",
                 dependency.name,
                 parent_manifest.display(),
                 self.root_name,
                 self.root_manifest.display()
-            ));
+            )));
         }
 
         let key = match &dependency.source {
             DependencySource::Path { path } => RequestKey::Path {
-                resolved: self.resolve_path(path, parent_manifest)?,
+                resolved: self.logical(&self.resolve_path(path, parent_manifest)?),
                 version: dependency.version.clone(),
             },
             DependencySource::Git {
@@ -208,7 +213,7 @@ impl<'a> Resolver<'a> {
                 tag,
                 rev,
             } => RequestKey::Git {
-                url: url.clone(),
+                url: source::identity(url),
                 branch: branch.clone(),
                 tag: tag.clone(),
                 rev: rev.clone(),
@@ -218,12 +223,21 @@ impl<'a> Resolver<'a> {
 
         if let Some(previous) = self.requests.get(&dependency.name) {
             if previous != &key {
-                return Err(format!(
+                return Err(Error::resolution(format!(
                     "package name `{}` refers to more than one source or version requirement",
                     dependency.name
-                ));
+                )));
             }
-            if self.packages.contains_key(&dependency.name) {
+            if let Some(package) = self.packages.get_mut(&dependency.name) {
+                if self.existing.package(&dependency.name).is_none() {
+                    if let (LockedSource::Path { requested, .. }, DependencySource::Path { path }) =
+                        (&mut package.source, &dependency.source)
+                    {
+                        if path < requested {
+                            *requested = path.clone();
+                        }
+                    }
+                }
                 return Ok(());
             }
         } else {
@@ -237,15 +251,32 @@ impl<'a> Resolver<'a> {
         {
             let mut cycle = self.visiting[index..].to_vec();
             cycle.push(dependency.name.clone());
-            return Err(format!("dependency cycle detected: {}", cycle.join(" -> ")));
+            return Err(Error::resolution(format!(
+                "dependency cycle detected: {}",
+                cycle.join(" -> ")
+            )));
         }
 
         let (resolved_path, locked_source) = match &dependency.source {
             DependencySource::Path { path } => {
                 let resolved = self.resolve_path(path, parent_manifest)?;
+                let relative = relative_to_root(&self.logical(&resolved), &self.root);
+                // `requested` is historical request spelling, not source identity.
+                // Resolve every current edge before reusing this annotation.
+                let requested = self
+                    .existing
+                    .package(&dependency.name)
+                    .and_then(|package| match &package.source {
+                        LockedSource::Path {
+                            requested,
+                            resolved,
+                        } if resolved == &relative => Some(requested.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| path.clone());
                 let source = LockedSource::Path {
-                    requested: path.clone(),
-                    resolved: relative_to_root(&self.logical(&resolved), &self.root),
+                    requested,
+                    resolved: relative,
                 };
                 (resolved, source)
             }
@@ -255,13 +286,91 @@ impl<'a> Resolver<'a> {
                 tag,
                 rev,
             } => {
-                let destination = self.dep_root.join(&dependency.name);
-                if let Some(transaction) = self.transaction {
-                    transaction.prepare(&dependency.name)?;
+                let canonical = crate::paths::checkout_name(&dependency.name);
+                let previous = self.existing.package(&dependency.name).and_then(|package| {
+                    if let LockedSource::Git { resolved, .. } = &package.source {
+                        Some(resolved.clone())
+                    } else {
+                        None
+                    }
+                });
+                let legacy = PathBuf::from(".vex/deps").join(&dependency.name);
+                let encoded = PathBuf::from(".vex/deps").join(&canonical);
+                if previous
+                    .as_ref()
+                    .is_some_and(|p| p != &legacy && p != &encoded)
+                {
+                    return Err(Error::resolution(format!(
+                        "invalid managed checkout path for `{}` in vex.lock",
+                        dependency.name
+                    )));
                 }
-                let commit = self.resolve_git_commit(dependency, &destination)?;
+                let preserve_layout = self.options.locked || self.options.dry_run;
+                let target = if preserve_layout {
+                    previous.as_ref().unwrap_or(&encoded)
+                } else {
+                    &encoded
+                };
+                let name = target.file_name().unwrap().to_str().unwrap();
+                let live = self.root.join(target);
+                let locked_commit = self.pinned_commit(dependency);
+                let reuse = if let Some(commit) = locked_commit.as_ref() {
+                    let checked = git::require_checkout_at(&live, url, &dependency.name, commit)
+                        .and_then(|()| git::is_detached(&live));
+                    match checked {
+                        Ok(detached) => detached,
+                        Err(error) if process::failure_code() != 1 => return Err(error),
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                };
+                let destination = if let (false, Some(transaction)) = (reuse, self.transaction) {
+                    if live.exists() {
+                        git::reject_dirty_checkout(&live, &dependency.name)?;
+                    }
+                    if let Some(previous) = previous.as_ref() {
+                        let old = self.root.join(previous);
+                        if old != live && old.exists() {
+                            git::reject_dirty_checkout(&old, &dependency.name)?;
+                        }
+                    }
+                    // A changed declaration uses a fresh candidate. Never reset
+                    // or repoint the previous checkout to the new repository.
+                    let same_source = self.existing.package(&dependency.name).is_some_and(|p| {
+                        matches!(&p.source, LockedSource::Git { url: old, .. } if source::identity(old) == source::identity(url))
+                    });
+                    if !same_source && previous.is_some() {
+                        transaction
+                            .prepare_fresh(name)
+                            .map_err(Error::environment)?;
+                    } else if !live.exists() && previous.as_ref().is_some_and(|p| p != target) {
+                        transaction
+                            .prepare_from(
+                                name,
+                                previous
+                                    .as_ref()
+                                    .unwrap()
+                                    .file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap(),
+                            )
+                            .map_err(Error::environment)?;
+                    } else {
+                        transaction.prepare(name).map_err(Error::environment)?;
+                    }
+                    transaction.path(name)
+                } else {
+                    live
+                };
+                let commit = if reuse {
+                    locked_commit.unwrap()
+                } else {
+                    self.resolve_git_commit(dependency, &destination)?
+                };
                 let source = LockedSource::Git {
-                    url: url.clone(),
+                    url: source::identity(url),
                     branch: branch.clone(),
                     tag: tag.clone(),
                     rev: rev.clone(),
@@ -275,34 +384,34 @@ impl<'a> Resolver<'a> {
         let manifest_path = resolved_path.join(MANIFEST_FILE);
         let package_manifest = Manifest::load_from(&manifest_path)?;
         if package_manifest.name != dependency.name {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "dependency is named `{}` but `{}` declares package `{}`",
                 dependency.name,
                 manifest_path.display(),
                 package_manifest.name
-            ));
+            )));
         }
         if !package_manifest.lib {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "dependency `{}` is not a library package\nhelp: set `lib = true` in `{}` and provide `src/lib.wave`",
                 dependency.name,
                 manifest_path.display()
-            ));
+            )));
         }
         let library_entry = resolved_path.join(package_manifest.default_entry_path());
         if !library_entry.is_file() {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "dependency `{}` has no canonical library entry `{}`\nhelp: library packages must expose `src/lib.wave`",
                 dependency.name,
                 library_entry.display()
-            ));
+            )));
         }
         if let Some(required) = dependency.version.as_deref() {
             if package_manifest.version != required {
-                return Err(format!(
+                return Err(Error::resolution(format!(
                     "dependency `{}` requires version `{required}` but source contains version `{}`",
                     dependency.name, package_manifest.version
-                ));
+                )));
             }
         }
 
@@ -322,11 +431,7 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
-    fn resolve_git_commit(
-        &mut self,
-        dependency: &Dependency,
-        destination: &Path,
-    ) -> Result<String, String> {
+    fn pinned_commit(&self, dependency: &Dependency) -> Option<String> {
         let DependencySource::Git {
             url,
             branch,
@@ -334,10 +439,9 @@ impl<'a> Resolver<'a> {
             rev,
         } = &dependency.source
         else {
-            return Err("internal error: expected Git dependency".to_string());
+            return None;
         };
-
-        let locked = if !self.preflight && self.options.update.updates(&dependency.name) {
+        if !self.preflight && self.options.update.updates(&dependency.name) {
             None
         } else {
             self.existing
@@ -350,7 +454,7 @@ impl<'a> Resolver<'a> {
                         rev: locked_rev,
                         commit,
                         ..
-                    } if locked_url == url
+                    } if source::identity(locked_url) == source::identity(url)
                         && locked_branch == branch
                         && locked_tag == tag
                         && locked_rev == rev =>
@@ -359,21 +463,39 @@ impl<'a> Resolver<'a> {
                     }
                     _ => None,
                 })
+        }
+    }
+
+    fn resolve_git_commit(
+        &mut self,
+        dependency: &Dependency,
+        destination: &Path,
+    ) -> Result<String, Error> {
+        let DependencySource::Git {
+            url,
+            branch,
+            tag,
+            rev,
+        } = &dependency.source
+        else {
+            return Err(Error::internal("expected Git dependency"));
         };
 
+        let locked = self.pinned_commit(dependency);
+
         if self.options.locked && locked.is_none() {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "`{LOCKFILE_NAME}` does not match Git dependency `{}`\nhelp: run `vex fetch` to update the lockfile",
                 dependency.name
-            ));
+            )));
         }
 
         if self.options.dry_run {
             let commit = locked.ok_or_else(|| {
-                format!(
+                Error::resolution(format!(
                     "Git dependency `{}` is not pinned in `{LOCKFILE_NAME}`\nhelp: run `vex fetch` first",
                     dependency.name
-                )
+                ))
             })?;
             git::require_checkout_at(destination, url, &dependency.name, &commit)?;
             return Ok(commit);
@@ -381,30 +503,35 @@ impl<'a> Resolver<'a> {
 
         if self.options.offline {
             let commit = locked.ok_or_else(|| {
-                format!(
+                Error::resolution(format!(
                     "Git dependency `{}` is not pinned for offline use\nhelp: run `vex fetch` while online",
                     dependency.name
-                )
+                ))
             })?;
             git::require_local_repository(destination, url, &dependency.name, &commit)?;
-            git::checkout_commit(destination, &dependency.name, &commit)?;
+            git::checkout_commit(destination, &dependency.name, &commit, false)?;
             return Ok(commit);
         }
 
-        git::ensure_repository(destination, url, &dependency.name, &mut *self.status)?;
+        let unborn = git::ensure_repository(destination, url, &dependency.name, &mut *self.status)?;
         git::reject_dirty_checkout(destination, &dependency.name)?;
 
         if let Some(commit) = locked {
             if !git::has_commit(destination, &commit)? {
                 (self.status)("Fetching", format!("{} ({url})", dependency.name));
-                git::fetch(destination)?;
+                git::fetch(destination, url)?;
+                if !git::has_commit(destination, &commit)? {
+                    return Err(Error::resolution(format!(
+                        "locked Git commit `{commit}` is not available from the declared source"
+                    )));
+                }
             }
-            git::checkout_commit(destination, &dependency.name, &commit)?;
+            git::checkout_commit(destination, &dependency.name, &commit, unborn)?;
             return Ok(commit);
         }
 
         (self.status)("Fetching", format!("{} ({url})", dependency.name));
-        git::fetch(destination)?;
+        git::fetch(destination, url)?;
         let reference = if let Some(branch) = branch {
             format!("refs/remotes/origin/{branch}^{{commit}}")
         } else if let Some(tag) = tag {
@@ -412,19 +539,11 @@ impl<'a> Resolver<'a> {
         } else if let Some(rev) = rev {
             format!("{rev}^{{commit}}")
         } else {
-            git::refresh_default_branch(destination)?;
+            git::refresh_default_branch(destination, url)?;
             "refs/remotes/origin/HEAD^{commit}".to_string()
         };
-        let commit = git::stdout(
-            git::command_in(destination).args([
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                &reference,
-            ]),
-            "resolve Git dependency reference",
-        )?;
-        git::checkout_commit(destination, &dependency.name, &commit)?;
+        let commit = git::resolve_reference(destination, &reference)?;
+        git::checkout_commit(destination, &dependency.name, &commit, unborn)?;
         Ok(commit)
     }
 }

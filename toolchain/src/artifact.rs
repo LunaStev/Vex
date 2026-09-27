@@ -1,0 +1,723 @@
+use flate2::read::GzDecoder;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+const REPOSITORY: &str = "https://api.github.com/repos/wavefnd/Wave/releases";
+const DOWNLOAD: &str = "https://github.com/wavefnd/Wave/releases/download/";
+const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
+const MAX_EXTRACTED: u64 = 2 * 1024 * 1024 * 1024;
+fn error(e: impl std::fmt::Display) -> String {
+    format!("compiler installation: {e}")
+}
+
+pub(crate) fn home() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("VEX_TOOLCHAIN_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    let variable = if cfg!(windows) {
+        "LOCALAPPDATA"
+    } else {
+        "HOME"
+    };
+    let base = std::env::var_os(variable)
+        .ok_or_else(|| error(format!("{variable} is not set; set VEX_TOOLCHAIN_HOME")))?;
+    Ok(PathBuf::from(base).join(".vex/toolchains"))
+}
+
+pub fn managed_wavec() -> Option<PathBuf> {
+    let root = home().ok()?;
+    let value = fs::read_to_string(root.join("current")).ok()?;
+    let path = relative(value.trim()).ok()?;
+    let binary = root.join(path);
+    binary.is_file().then_some(binary)
+}
+
+pub(super) fn version(value: &str) -> Result<String, String> {
+    let parsed = semver::Version::parse(value.strip_prefix('v').unwrap_or(value)).map_err(error)?;
+    if !parsed.build.is_empty() {
+        return Err(error("build metadata is not supported"));
+    }
+    Ok(parsed.to_string())
+}
+
+fn target() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("x86_64-linux-gnu"),
+        ("linux", "aarch64") => Ok("aarch64-linux-gnu"),
+        ("linux", "riscv64") => Ok("riscv64-linux-gnu"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-gnu"),
+        _ => Err(error("no supported compiler artifact for this host")),
+    }
+}
+
+fn curl(url: &str) -> Command {
+    let mut command = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    command.args([
+        "--disable",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        "300",
+        "--user-agent",
+        "Vex-toolchain/1",
+        url,
+    ]);
+    command
+}
+fn get(url: &str) -> Result<Vec<u8>, String> {
+    let output = process::output(&mut curl(url), Duration::from_secs(310)).map_err(error)?;
+    if !output.status.success() {
+        return Err(error(format!(
+            "download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(output.stdout)
+}
+fn download(url: &str, path: &Path) -> Result<(), String> {
+    let output = process::output(
+        curl(url)
+            .args(["--max-filesize", &MAX_ARCHIVE.to_string(), "--output"])
+            .arg(path),
+        Duration::from_secs(310),
+    )
+    .map_err(error)?;
+    if !output.status.success() {
+        return Err(error(format!(
+            "archive download failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    if fs::metadata(path).map_err(error)?.len() > MAX_ARCHIVE {
+        return Err(error("archive exceeds 512 MiB"));
+    }
+    Ok(())
+}
+
+struct ReleasePlan {
+    tag: String,
+    version: String,
+    name: String,
+    archive_url: String,
+    checksum_url: String,
+}
+fn select_release(
+    release: &Value,
+    requested: Option<&str>,
+    target: &str,
+    extension: &str,
+) -> Result<ReleasePlan, String> {
+    if release["draft"] != false {
+        return Err(error("release is draft or malformed"));
+    }
+    let tag = release["tag_name"]
+        .as_str()
+        .ok_or_else(|| error("release has no tag"))?;
+    let version = version(tag)?;
+    if tag != format!("v{version}") || requested.is_some_and(|v| v != version) {
+        return Err(error(
+            "release version does not match the requested identity",
+        ));
+    }
+    let name = format!("wave-{tag}-{target}.{extension}");
+    let assets = release["assets"]
+        .as_array()
+        .ok_or_else(|| error("release has no assets"))?;
+    let asset = |name: &str| -> Result<&str, String> {
+        let matches: Vec<_> = assets.iter().filter(|a| a["name"] == name).collect();
+        if matches.len() != 1 {
+            return Err(error(format!(
+                "release must contain exactly one {name}; no automatic script fallback"
+            )));
+        }
+        let url = matches[0]["browser_download_url"]
+            .as_str()
+            .ok_or_else(|| error("asset has no URL"))?;
+        if url != format!("{DOWNLOAD}{tag}/{name}") {
+            return Err(error("asset URL is outside the official release"));
+        }
+        Ok(url)
+    };
+    let archive_url = asset(&name)?.to_owned();
+    let checksum_url = asset("SHA256SUMS")?.to_owned();
+    Ok(ReleasePlan {
+        tag: tag.into(),
+        version,
+        name,
+        archive_url,
+        checksum_url,
+    })
+}
+
+pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
+    let requested = requested.map(version).transpose()?;
+    let endpoint = requested
+        .as_ref()
+        .map(|v| format!("{REPOSITORY}/tags/v{v}"))
+        .unwrap_or_else(|| format!("{REPOSITORY}/latest"));
+    let release: Value = serde_json::from_slice(&get(&endpoint)?).map_err(error)?;
+    let target = target()?;
+    let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
+    let ReleasePlan {
+        tag,
+        version,
+        name,
+        archive_url,
+        checksum_url,
+    } = select_release(&release, requested.as_deref(), target, extension)?;
+    let checksum_text = String::from_utf8(get(&checksum_url)?).map_err(error)?;
+    let expected = checksum(&checksum_text, &name)?;
+    let root = home()?;
+    fs::create_dir_all(&root).map_err(error)?;
+    state::reject_link(&root)?;
+    let root = root.canonicalize().map_err(error)?;
+    let lock_path = root.join("install.lock");
+    state::reject_link(&lock_path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(error)?;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(fs::TryLockError::WouldBlock) => {
+                if process::cancelled() {
+                    return Err(error("operation cancelled"));
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            Err(e) => return Err(error(e)),
+        }
+    }
+    let stage = create_stage(&root)?;
+    let result = (|| {
+        let archive = stage.join("download");
+        download(&archive_url, &archive)?;
+        verify_checksum(&archive, &expected)?;
+        verify_provenance(&archive, &expected, &tag)?;
+        let payload = stage.join("payload");
+        fs::create_dir(&payload).map_err(error)?;
+        extract(&archive, &payload, extension == "zip")?;
+        let candidates = binaries(&payload)?;
+        if candidates.len() != 1 {
+            return Err(error("archive must contain exactly one wavec executable"));
+        }
+        let binary = &candidates[0];
+        let output = process::output(
+            Command::new(binary).arg("--version"),
+            Duration::from_secs(30),
+        )
+        .map_err(error)?;
+        let output_text = String::from_utf8(output.stdout).map_err(error)?;
+        if !output.status.success()
+            || !matches!(output_text.split_whitespace().take(2).collect::<Vec<_>>().as_slice(), ["wavec", actual] if actual.strip_prefix('v').unwrap_or(actual) == version)
+        {
+            return Err(error(
+                "downloaded compiler version does not match the release",
+            ));
+        }
+        let relative_binary = binary.strip_prefix(&payload).map_err(error)?.to_owned();
+        // The checksum makes reinstalling a changed release a distinct generation.
+        let generation = format!(
+            "wavec-{version}-{target}-{}-{}",
+            &expected[..16],
+            stage.file_name().unwrap().to_string_lossy()
+        );
+        publish_candidate(
+            &root,
+            &stage,
+            &payload,
+            &generation,
+            &relative_binary,
+            || Ok(()),
+        )
+    })();
+    let cleanup = fs::remove_dir_all(&stage);
+    match (result, cleanup) {
+        (Err(e), _) => Err(e),
+        (Ok(binary), Ok(())) => Ok(binary),
+        (Ok(binary), Err(e)) => {
+            eprintln!(
+                "warning: installed {}; temporary cleanup failed at {}: {e}",
+                binary.display(),
+                stage.display()
+            );
+            Ok(binary)
+        }
+    }
+}
+
+fn publish_candidate(
+    root: &Path,
+    stage: &Path,
+    payload: &Path,
+    generation: &str,
+    relative_binary: &Path,
+    before_switch: impl FnOnce() -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let destination = root.join(generation);
+    state::reject_link(&destination)?;
+    if destination.exists() {
+        return Err(error(format!("verified generation already exists at {}; preserve it or select its wavec with VEX_WAVEC", destination.display())));
+    }
+    sync_tree(payload)?;
+    state::atomic_rename(payload, &destination).map_err(error)?;
+    let current = PathBuf::from(generation).join(relative_binary);
+    let pointer = stage.join("current");
+    let mut file = File::create_new(&pointer).map_err(error)?;
+    file.write_all(current.to_string_lossy().replace('\\', "/").as_bytes())
+        .map_err(error)?;
+    file.sync_all().map_err(error)?;
+    drop(file);
+    before_switch()?;
+    state::reject_link(&root.join("current"))?;
+    state::atomic_rename(&pointer, &root.join("current")).map_err(error)?;
+    Ok(root.join(current))
+}
+
+fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), String> {
+    let endpoint =
+        format!("https://api.github.com/repos/wavefnd/Wave/attestations/sha256:{digest}");
+    // An explicit 404 is absence; authentication, rate-limit and transport
+    // failures must not be silently treated as an un-attested release.
+    let mut command = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    command.args([
+        "--disable",
+        "--silent",
+        "--show-error",
+        "--proto",
+        "=https",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        "60",
+        "--write-out",
+        "\n%{http_code}",
+        &endpoint,
+    ]);
+    let result = process::output(&mut command, Duration::from_secs(70)).map_err(error)?;
+    if !result.status.success() {
+        return Err(error("could not query release provenance"));
+    }
+    let response = String::from_utf8(result.stdout).map_err(error)?;
+    let (body, status) = response
+        .rsplit_once('\n')
+        .ok_or_else(|| error("invalid provenance response"))?;
+    if status == "404" {
+        eprintln!(
+            "note: official Wave archive has no published GitHub provenance; SHA-256 verified"
+        );
+        return Ok(());
+    }
+    if status != "200" {
+        return Err(error(format!("provenance query failed with HTTP {status}")));
+    }
+    let response: Value = serde_json::from_str(body).map_err(error)?;
+    let attestations = response["attestations"]
+        .as_array()
+        .ok_or_else(|| error("invalid provenance response"))?;
+    if attestations.is_empty() {
+        eprintln!(
+            "note: official Wave archive has no published GitHub provenance; SHA-256 verified"
+        );
+        return Ok(());
+    }
+    let commit: Value = serde_json::from_slice(&get(&format!(
+        "https://api.github.com/repos/wavefnd/Wave/commits/{tag}"
+    ))?)
+    .map_err(error)?;
+    let commit = commit["sha"]
+        .as_str()
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| error("release tag has no valid source commit"))?;
+    let verification = process::output(
+        Command::new("gh")
+            .args(["attestation", "verify"])
+            .arg(archive)
+            .args([
+                "--repo",
+                "wavefnd/Wave",
+                "--source-digest",
+                commit,
+                "--deny-self-hosted-runners",
+            ]),
+        Duration::from_secs(120),
+    )
+    .map_err(|e| {
+        error(format!(
+            "published provenance requires GitHub CLI verification: {e}"
+        ))
+    })?;
+    if !verification.status.success() {
+        return Err(error("published compiler provenance verification failed"));
+    }
+    Ok(())
+}
+
+fn create_stage(root: &Path) -> Result<PathBuf, String> {
+    for counter in 0..100 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(error)?
+            .as_nanos();
+        let path = root.join(format!(".install-{}-{stamp}-{counter}", std::process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(e) => return Err(error(e)),
+        }
+    }
+    Err(error("could not allocate installation staging directory"))
+}
+fn checksum(text: &str, filename: &str) -> Result<String, String> {
+    let mut found = None;
+    for line in text.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() == 2 && fields[1].trim_start_matches('*') == filename {
+            if found.is_some()
+                || fields[0].len() != 64
+                || !fields[0].bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(error("invalid or duplicate checksum"));
+            }
+            found = Some(fields[0].to_ascii_lowercase());
+        }
+    }
+    found.ok_or_else(|| error("release checksum is missing"))
+}
+fn verify_checksum(path: &Path, expected: &str) -> Result<(), String> {
+    let mut file = File::open(path).map_err(error)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let size = file.read(&mut buffer).map_err(error)?;
+        if size == 0 {
+            break;
+        }
+        hasher.update(&buffer[..size]);
+    }
+    if format!("{:x}", hasher.finalize()) != expected {
+        return Err(error(
+            "archive SHA-256 mismatch; existing installation preserved",
+        ));
+    }
+    Ok(())
+}
+fn relative(name: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(name);
+    if path.as_os_str().is_empty()
+        || name.contains(['\\', ':', '\0'])
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(error("archive contains an unsafe path"));
+    }
+    if path.components().count() > 64 {
+        return Err(error("archive nesting exceeds 64 levels"));
+    }
+    for part in name
+        .split('/')
+        .filter(|part| *part != "." && !part.is_empty())
+    {
+        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if part.ends_with([' ', '.'])
+            || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && stem.as_bytes()[3].is_ascii_digit()
+        {
+            return Err(error("archive path is not portable"));
+        }
+    }
+    Ok(path)
+}
+fn extract(archive: &Path, root: &Path, zip: bool) -> Result<(), String> {
+    let mut total = 0u64;
+    let mut count = 0usize;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut write = |name: &str,
+                     directory: bool,
+                     size: u64,
+                     reader: &mut dyn Read,
+                     mode: u32|
+     -> Result<(), String> {
+        count += 1;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| error("archive size overflow"))?;
+        if count > 100_000 || total > MAX_EXTRACTED {
+            return Err(error("archive extraction limit exceeded"));
+        }
+        let path = relative(name)?;
+        if !seen.insert(path.to_string_lossy().to_ascii_lowercase()) {
+            return Err(error("duplicate or case-colliding archive path"));
+        }
+        let destination = root.join(path);
+        if directory {
+            fs::create_dir_all(destination).map_err(error)?;
+            return Ok(());
+        }
+        fs::create_dir_all(destination.parent().unwrap()).map_err(error)?;
+        let mut file = File::create_new(&destination).map_err(error)?;
+        let copied = std::io::copy(&mut reader.take(size + 1), &mut file).map_err(error)?;
+        if copied != size {
+            return Err(error("archive entry length mismatch"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(if mode & 0o111 != 0 {
+                0o755
+            } else {
+                0o644
+            }))
+            .map_err(error)?;
+        }
+        #[cfg(windows)]
+        let _ = mode;
+        file.sync_all().map_err(error)
+    };
+    if zip {
+        let mut archive =
+            zip::ZipArchive::new(File::open(archive).map_err(error)?).map_err(error)?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(error)?;
+            if entry.is_symlink() {
+                return Err(error("archive symlinks are unsupported"));
+            }
+            let name = entry.name().to_string();
+            let (directory, size, mode) =
+                (entry.is_dir(), entry.size(), entry.unix_mode().unwrap_or(0));
+            write(&name, directory, size, &mut entry, mode)?;
+        }
+    } else {
+        let mut archive = tar::Archive::new(GzDecoder::new(File::open(archive).map_err(error)?));
+        for entry in archive.entries().map_err(error)? {
+            let mut entry = entry.map_err(error)?;
+            let kind = entry.header().entry_type();
+            if !kind.is_file() && !kind.is_dir() {
+                return Err(error("archive links and special files are unsupported"));
+            }
+            let name = entry
+                .path()
+                .map_err(error)?
+                .to_str()
+                .ok_or_else(|| error("non-UTF-8 archive path"))?
+                .to_owned();
+            let (size, mode) = (entry.size(), entry.header().mode().map_err(error)?);
+            write(&name, kind.is_dir(), size, &mut entry, mode)?;
+        }
+    }
+    Ok(())
+}
+fn binaries(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(root).map_err(error)? {
+        let entry = entry.map_err(error)?;
+        if entry.file_type().map_err(error)?.is_dir() {
+            found.extend(binaries(&entry.path())?);
+        } else if entry.file_name() == if cfg!(windows) { "wavec.exe" } else { "wavec" } {
+            found.push(entry.path());
+        }
+    }
+    Ok(found)
+}
+fn sync_tree(root: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(root).map_err(error)? {
+        let path = entry.map_err(error)?.path();
+        if path.is_dir() {
+            sync_tree(&path)?;
+        } else {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(error)?
+                .sync_all()
+                .map_err(error)?;
+        }
+    }
+    state::sync_dir(root).map_err(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            Self(create_stage(&std::env::temp_dir()).unwrap())
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn fake_release_metadata_rejects_ambiguous_or_redirected_assets() {
+        let name = "wave-v1.2.3-test-target.tar.gz";
+        let release = serde_json::json!({"draft":false,"tag_name":"v1.2.3","assets":[
+            {"name":name,"browser_download_url":format!("{DOWNLOAD}v1.2.3/{name}")},
+            {"name":"SHA256SUMS","browser_download_url":format!("{DOWNLOAD}v1.2.3/SHA256SUMS")}
+        ]});
+        let plan = select_release(&release, Some("1.2.3"), "test-target", "tar.gz").unwrap();
+        assert_eq!(plan.version, "1.2.3");
+        assert!(select_release(&release, Some("1.2.4"), "test-target", "tar.gz").is_err());
+        for change in 0..4 {
+            let mut invalid = release.clone();
+            match change {
+                0 => invalid["draft"] = true.into(),
+                1 => {
+                    invalid["assets"].as_array_mut().unwrap().pop();
+                }
+                2 => {
+                    invalid["assets"][0]["browser_download_url"] =
+                        "https://untrusted.invalid/archive".into()
+                }
+                _ => {
+                    let duplicate = invalid["assets"][0].clone();
+                    invalid["assets"].as_array_mut().unwrap().push(duplicate);
+                }
+            }
+            assert!(select_release(&invalid, None, "test-target", "tar.gz").is_err());
+        }
+    }
+
+    #[test]
+    fn pointer_failure_preserves_previous_installation_and_published_candidate() {
+        let fixture = Fixture::new();
+        fs::create_dir(fixture.0.join("old")).unwrap();
+        fs::write(fixture.0.join("old/wavec"), b"old compiler").unwrap();
+        fs::write(fixture.0.join("current"), b"old/wavec").unwrap();
+        let stage = create_stage(&fixture.0).unwrap();
+        let payload = stage.join("payload");
+        fs::create_dir(&payload).unwrap();
+        fs::write(payload.join("wavec"), b"new compiler").unwrap();
+        let result = publish_candidate(
+            &fixture.0,
+            &stage,
+            &payload,
+            "new",
+            Path::new("wavec"),
+            || Err("injected pointer publication failure".into()),
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(fixture.0.join("current")).unwrap(), b"old/wavec");
+        assert_eq!(
+            fs::read(fixture.0.join("old/wavec")).unwrap(),
+            b"old compiler"
+        );
+        assert_eq!(
+            fs::read(fixture.0.join("new/wavec")).unwrap(),
+            b"new compiler"
+        );
+    }
+
+    #[test]
+    fn checksum_is_exact_unique_and_required() {
+        let digest = "a".repeat(64);
+        assert_eq!(
+            checksum(&format!("{digest}  wave.tar.gz\n"), "wave.tar.gz").unwrap(),
+            digest
+        );
+        assert!(checksum(&format!("{digest}  other.tar.gz\n"), "wave.tar.gz").is_err());
+        assert!(checksum(
+            &format!("{digest}  wave.tar.gz\n{digest}  wave.tar.gz\n"),
+            "wave.tar.gz"
+        )
+        .is_err());
+        let fixture = Fixture::new();
+        let archive = fixture.0.join("archive");
+        fs::write(&archive, "modified archive").unwrap();
+        assert!(verify_checksum(&archive, &digest).is_err());
+    }
+
+    #[test]
+    fn hostile_paths_and_noncanonical_versions_are_rejected() {
+        for path in [
+            "../escape",
+            "/escape",
+            "C:/escape",
+            "a\\b",
+            "con.txt",
+            "dir/COM1",
+            "trailing.",
+            "nul",
+            "a/../../escape",
+        ] {
+            assert!(relative(path).is_err(), "{path}");
+        }
+        assert!(relative("wave-v1.0.0/llvm/lib/libLLVM.so").is_ok());
+        for value in ["1.0.0+build", "../1.0.0", "01.0.0", "1.0"] {
+            assert!(version(value).is_err());
+        }
+        assert_eq!(version("v1.0.0-beta.1").unwrap(), "1.0.0-beta.1");
+    }
+
+    #[test]
+    fn tar_links_and_truncated_archives_cannot_be_installed() {
+        let fixture = Fixture::new();
+        let archive = fixture.0.join("archive.tar.gz");
+        let output = fixture.0.join("output");
+        fs::create_dir(&output).unwrap();
+        let gzip = flate2::write::GzEncoder::new(
+            File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(gzip);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_link_name("../outside").unwrap();
+        header.set_cksum();
+        builder.append_data(&mut header, "link", &[][..]).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        assert!(extract(&archive, &output, false)
+            .unwrap_err()
+            .contains("links"));
+        assert!(!output.join("link").exists());
+        fs::write(&archive, b"truncated").unwrap();
+        assert!(extract(&archive, &output, false).is_err());
+    }
+
+    #[test]
+    fn zip_case_collisions_and_size_corruption_are_rejected() {
+        let fixture = Fixture::new();
+        let archive = fixture.0.join("archive.zip");
+        let output = fixture.0.join("output");
+        fs::create_dir(&output).unwrap();
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        for name in ["Wavec", "wavec"] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"binary").unwrap();
+        }
+        writer.finish().unwrap();
+        assert!(extract(&archive, &output, true)
+            .unwrap_err()
+            .contains("case-colliding"));
+    }
+}

@@ -1,21 +1,20 @@
+use diagnostic::Error;
 use manifest::{DependencySource, Manifest};
 
-pub fn info(args: &[String]) {
+pub fn info(args: &[String]) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!("usage: vex info");
-        return;
+        return Ok(());
     }
     if let Some(argument) = args.first() {
-        eprintln!("error: unexpected argument `{argument}`\nusage: vex info");
-        std::process::exit(2);
+        return Err(Error::usage(format!(
+            "unexpected argument `{argument}`\nusage: vex info"
+        )));
     }
-    if let Err(err) = run_info() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
-    }
+    run_info()
 }
 
-fn run_info() -> Result<(), String> {
+fn run_info() -> Result<(), Error> {
     let manifest = Manifest::load()?;
     println!("Vex project info");
     println!("name: {}", manifest.name);
@@ -52,9 +51,15 @@ fn run_info() -> Result<(), String> {
                     .unwrap_or_default();
                 match dep.version {
                     Some(version) => {
-                        println!("  {} {} git {}{}", dep.name, version, url, reference)
+                        println!(
+                            "  {} {} git {}{}",
+                            dep.name,
+                            version,
+                            source::identity(&url),
+                            reference
+                        )
                     }
-                    None => println!("  {} git {}{}", dep.name, url, reference),
+                    None => println!("  {} git {}{}", dep.name, source::identity(&url), reference),
                 }
             }
         }

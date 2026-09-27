@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 mod parse;
@@ -7,6 +6,21 @@ mod render;
 pub use render::render_new_manifest;
 
 pub const MANIFEST_FILE: &str = "vex.ws";
+
+/// Package names are Wave import identifiers. Never silently normalize a name.
+pub fn validate_package_name(name: &str) -> Result<(), String> {
+    let mut bytes = name.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(format!(
+            "invalid package name `{name}`: use [A-Za-z_][A-Za-z0-9_]*"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum DependencySource {
@@ -41,36 +55,44 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    pub fn load() -> Result<Self, String> {
+    pub fn load() -> Result<Self, diagnostic::Error> {
         let source_path = Path::new(MANIFEST_FILE);
         if !source_path.is_file() {
             let directory = std::env::current_dir()
                 .map(|path| path.to_string_lossy().to_string())
                 .unwrap_or_else(|_| ".".to_string());
-            return Err(format!(
+            return Err(diagnostic::Error::environment(format!(
                 "could not find `{MANIFEST_FILE}` in `{directory}`\nhelp: run `vex init` to create a package"
-            ));
+            )));
         }
         Self::load_from(source_path)
     }
 
-    pub fn load_from(source_path: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn load_from(source_path: impl AsRef<Path>) -> Result<Self, diagnostic::Error> {
         let source_path = source_path.as_ref().to_path_buf();
         if !source_path.is_file() {
-            return Err(format!(
+            return Err(diagnostic::Error::environment(format!(
                 "manifest not found at `{}`",
                 source_path.to_string_lossy()
-            ));
+            )));
         }
 
-        let raw = fs::read_to_string(&source_path)
-            .map_err(|e| format!("failed to read `{}`: {e}", source_path.to_string_lossy()))?;
+        let raw = wson::read_document(&source_path).map_err(|e| {
+            diagnostic::Error::new(
+                if e.kind() == std::io::ErrorKind::InvalidData {
+                    diagnostic::Category::Resolution
+                } else {
+                    diagnostic::Category::Environment
+                },
+                format!("failed to read `{}`: {e}", source_path.to_string_lossy()),
+            )
+        })?;
 
         parse::parse_manifest(&raw, source_path.clone()).map_err(|err| {
-            format!(
+            diagnostic::Error::resolution(format!(
                 "failed to load manifest `{}`: {err}",
                 source_path.to_string_lossy()
-            )
+            ))
         })
     }
 

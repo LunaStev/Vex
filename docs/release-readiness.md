@@ -35,11 +35,12 @@ format versions do not introduce SemVer dependency requirements or a registry.
 3. For targeted update, discover the current graph using only available local
    manifests and pinned Git checkouts. If that cannot be established, request an
    explicit `vex fetch`; do not query remotes just to validate a name.
-4. Stage candidate checkouts, including isolated copies of reused repositories.
+4. Reuse verified, clean, already detached checkouts directly. Stage isolated
+   candidates only for clone, migration, source changes or checkout updates.
    Resolve and validate the whole graph before moving live directories. Preserve
    declared origins, exact SHAs, dirty data, and unrelated remote-tracking refs.
 5. Sync candidates and publish the journal. Move old checkouts into backups and
-   rename complete candidates into the existing `.vex/deps/<name>` paths.
+   rename complete candidates into the canonical `.vex/deps/pkg_<SHA-256 of package name>` paths.
 6. Atomically replace the lockfile when its graph/format changes. This is the
    commit point. When lockfile bytes must stay unchanged, use the journal's
    committed marker after all checkout transitions instead.
@@ -70,7 +71,7 @@ single JSON plan, compiles without `--run`, checks the produced artifact, drops
 the dependency/build guard, and only then spawns the program or compiler-selected
 runner with structured arguments. Node/WASM and QEMU runners are not converted to
 shell command strings. Runtime cwd, environment and stdio remain inherited; the
-existing Vex failure-exit behavior is retained.
+program exit code is preserved (Unix signal exits use `128 + signal`).
 
 Run generations have no automatic GC. This also avoids assuming that all runtime
 children have exited when the original program returns. Disk usage increases
@@ -106,3 +107,8 @@ Before release: run the new concurrency/recovery tests natively on Linux,
 Windows and macOS, verify clean-environment packages, complete the dependency
 audit, and validate/pin the next official Wave release. Cross compilation and a
 local development wavec smoke do not substitute for those native release gates.
+
+The subsequent [production hardening changes](production-hardening.md) add bounded
+Git execution, cancellation, safe compiler artifact installation, dependency
+scanning and release provenance. Their native CI acceptance remains required
+before release; a local cross-compile is not that evidence.

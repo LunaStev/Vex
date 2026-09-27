@@ -1,7 +1,9 @@
 mod cli;
 mod commands;
+mod messages;
+mod outcome;
 mod ui;
 
 fn main() {
-    cli::run();
+    std::process::exit(cli::run());
 }

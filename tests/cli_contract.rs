@@ -64,7 +64,7 @@ fn invalid_init_and_info_fail_without_mutating_the_directory() {
     assert!(!fixture.0.join("src").exists());
 
     let missing_info = vex(&fixture.0, &["info"]);
-    assert_eq!(missing_info.status.code(), Some(1));
+    assert_eq!(missing_info.status.code(), Some(5));
     assert!(String::from_utf8_lossy(&missing_info.stderr).contains("could not find `vex.ws`"));
 
     let invalid_info = vex(&fixture.0, &["info", "extra"]);
@@ -148,7 +148,7 @@ fn manifest_optional_metadata_errors_name_the_field_and_file() {
         )
         .unwrap();
         let output = vex(&fixture.0, &["info"]);
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(3));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("manifest `vex.ws`"), "{stderr}");
         assert!(
@@ -199,7 +199,7 @@ fn strict_manifest_errors_precede_project_mutation() {
     for (manifest, expected) in cases {
         fs::write(fixture.0.join("vex.ws"), manifest).unwrap();
         let output = vex(&fixture.0, &["fetch"]);
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(3));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("manifest `vex.ws`"), "{stderr}");
         assert!(stderr.contains(expected), "{stderr}");
@@ -220,7 +220,7 @@ fn duplicate_dependencies_are_invalid_for_every_project_command() {
 
     for command in ["info", "tree", "fetch", "update", "build", "run", "check"] {
         let output = vex(&fixture.0, &[command]);
-        assert_eq!(output.status.code(), Some(1), "{command}");
+        assert_eq!(output.status.code(), Some(3), "{command}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("manifest `vex.ws`"), "{stderr}");
         assert!(
@@ -261,7 +261,7 @@ fn transitive_path_dependency_cannot_reuse_the_root_name() {
     fs::write(shadow.join("src/lib.wave"), "pub fun shadow() {}\n").unwrap();
 
     let output = vex(&app, &["fetch"]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("reuses root package name `app`"),
@@ -288,13 +288,13 @@ fn missing_or_malformed_target_fails_before_project_work() {
             &[mode, "--target", "--"][..],
         ] {
             let output = vex(&fixture.0, args);
-            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.status.code(), Some(2));
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains("missing value for `--target`"), "{stderr}");
             assert!(!stderr.contains("could not find `vex.ws`"), "{stderr}");
         }
         let malformed = vex(&fixture.0, &[mode, "--target=bad/target"]);
-        assert_eq!(malformed.status.code(), Some(1));
+        assert_eq!(malformed.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&malformed.stderr).contains("invalid value"));
     }
     assert!(!fixture.0.join("target").exists());
@@ -310,7 +310,10 @@ fn invalid_projects_never_report_dependency_or_compiler_work_started() {
         }
         for command in ["update", "fetch", "build", "run", "check", "tree"] {
             let output = vex(&fixture.0, &[command]);
-            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(
+                output.status.code(),
+                Some(if manifest.is_some() { 3 } else { 5 })
+            );
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains("vex.ws"), "{stderr}");
             for status in [
@@ -351,7 +354,7 @@ fn dependencies_must_be_library_packages_with_src_lib_wave() {
     .unwrap();
 
     let non_library = vex(&app, &["fetch"]);
-    assert_eq!(non_library.status.code(), Some(1));
+    assert_eq!(non_library.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&non_library.stderr)
         .contains("dependency `add` is not a library package"));
 
@@ -361,7 +364,7 @@ fn dependencies_must_be_library_packages_with_src_lib_wave() {
     )
     .unwrap();
     let missing_entry = vex(&app, &["fetch"]);
-    assert_eq!(missing_entry.status.code(), Some(1));
+    assert_eq!(missing_entry.status.code(), Some(3));
     assert!(
         String::from_utf8_lossy(&missing_entry.stderr).contains("has no canonical library entry")
     );
@@ -448,4 +451,240 @@ fn assert_success(output: &Output, action: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn init_rejects_invalid_names_before_creating_state() {
+    let fixture = TestDir::new();
+    for name in ["invalid-name", "0invalid", "space name", "한글"] {
+        let project = fixture.0.join(name);
+        fs::create_dir(&project).unwrap();
+        let output = vex(&project, &["init"]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid package name"));
+        assert_eq!(fs::read_dir(project).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn init_preserves_existing_lock_and_rolls_back_failed_publication() {
+    let fixture = TestDir::new();
+    let project = fixture.0.join("app");
+    fs::create_dir(&project).unwrap();
+    fs::write(project.join("vex.lock"), "preserve me").unwrap();
+    assert!(!vex(&project, &["init"]).status.success());
+    assert_eq!(fs::read(project.join("vex.lock")).unwrap(), b"preserve me");
+    assert!(!project.join("src").exists());
+    assert!(!project.join("vex.ws").exists());
+    fs::remove_file(project.join("vex.lock")).unwrap();
+    for point in ["src/main.wave", "vex.lock", ".gitignore"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .args(["init"])
+            .current_dir(&project)
+            .env("VEX_TEST_INIT_FAIL_AFTER", point)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        for path in [
+            "src",
+            "vex.ws",
+            "vex.lock",
+            ".gitignore",
+            ".vex/init.json",
+            ".vex/init-stage",
+        ] {
+            assert!(!project.join(path).exists(), "{point}: {path}");
+        }
+    }
+    assert_success(&vex(&project, &["init"]), "retry initialization");
+}
+
+#[test]
+fn dependency_free_fetch_creates_a_missing_lockfile_offline() {
+    let fixture = TestDir::new();
+    fs::write(fixture.0.join("vex.ws"), "{ name = \"app\" }").unwrap();
+    assert!(!vex(&fixture.0, &["fetch", "--locked", "--offline"])
+        .status
+        .success());
+    assert!(!fixture.0.join("vex.lock").exists());
+    assert_success(
+        &vex(&fixture.0, &["fetch", "--offline"]),
+        "empty offline fetch",
+    );
+    let bytes = fs::read(fixture.0.join("vex.lock")).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("version = 3"));
+    assert_success(
+        &vex(&fixture.0, &["fetch", "--locked", "--offline"]),
+        "empty locked reuse",
+    );
+    assert_eq!(fs::read(fixture.0.join("vex.lock")).unwrap(), bytes);
+}
+
+#[test]
+fn init_restart_recovers_crash_but_preserves_subsequent_edits() {
+    let fixture = TestDir::new();
+    for (name, edit) in [("clean", false), ("edited", true)] {
+        let project = fixture.0.join(name);
+        fs::create_dir(&project).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .arg("init")
+            .current_dir(&project)
+            .env("VEX_TEST_INIT_CRASH_AFTER", "vex.lock")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(99));
+        assert!(project.join(".vex/init.json").is_file());
+        if edit {
+            fs::write(project.join("src/main.wave"), "keep my edit").unwrap();
+        }
+        let retry = vex(&project, &["init"]);
+        if edit {
+            assert!(!retry.status.success());
+            assert_eq!(
+                fs::read(project.join("src/main.wave")).unwrap(),
+                b"keep my edit"
+            );
+            assert!(project.join(".vex/init.json").exists());
+        } else {
+            assert_success(&retry, "crash recovery and retry");
+            assert!(project.join("vex.ws").is_file());
+            assert!(!project.join(".vex/init.json").exists());
+        }
+    }
+}
+
+#[test]
+fn message_contract_covers_help_usage_resolution_and_environment_for_all_commands() {
+    use serde_json::Value;
+    let fixture = TestDir::new();
+    let mut index = 0;
+    let mut check = |args: &[&str], category: &str, code: i32| {
+        index += 1;
+        let report = format!("report-{index}.jsonl");
+        let mut full = vec!["--message-file", report.as_str()];
+        full.extend_from_slice(args);
+        let output = vex(&fixture.0, &full);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let events: Vec<Value> = fs::read_to_string(fixture.0.join(&report))
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(events.last().unwrap()["event"], "finished");
+        assert_eq!(events.last().unwrap()["category"], category);
+        assert_eq!(events.last().unwrap()["origin"], "vex");
+        assert_eq!(events.last().unwrap()["exit_code"], code);
+        assert_eq!(events.last().unwrap()["success"], code == 0);
+    };
+    for command in [
+        "init", "build", "check", "run", "fetch", "update", "info", "tree", "setup",
+    ] {
+        check(&[command, "--help"], "success", 0);
+        check(&[command, "--unknown"], "usage", 2);
+    }
+    for option in ["--version", "--help"] {
+        check(&[option], "success", 0);
+    }
+    check(&["bad-command"], "usage", 2);
+    check(
+        &["setup", "wavec", "--version", "1.2.3+metadata"],
+        "usage",
+        2,
+    );
+    for command in ["info", "build", "check", "run", "tree", "fetch", "update"] {
+        check(&[command], "environment", 5);
+    }
+    fs::write(fixture.0.join("vex.ws"), "{name=false}").unwrap();
+    for command in ["info", "build", "check", "run", "tree", "fetch", "update"] {
+        check(&[command], "resolution", 3);
+    }
+    fs::write(fixture.0.join("vex.ws"), "{name=\"app\"}").unwrap();
+    fs::write(fixture.0.join("vex.lock"), "{version=999}").unwrap();
+    check(&["fetch", "--locked"], "resolution", 3);
+}
+
+#[test]
+fn message_file_never_overwrites_existing_paths_or_creates_parents() {
+    let fixture = TestDir::new();
+    fs::write(fixture.0.join("existing"), b"keep").unwrap();
+    fs::create_dir(fixture.0.join("directory")).unwrap();
+    for path in ["existing", "directory", "missing/report.jsonl"] {
+        let output = vex(&fixture.0, &["--message-file", path, "--help"]);
+        assert_eq!(output.status.code(), Some(5));
+    }
+    assert_eq!(fs::read(fixture.0.join("existing")).unwrap(), b"keep");
+    assert!(!fixture.0.join("missing").exists());
+    for args in [
+        vec!["--message-file"],
+        vec!["--message-file", "a", "--message-file", "b"],
+    ] {
+        assert_eq!(vex(&fixture.0, &args).status.code(), Some(2));
+    }
+    assert!(!fixture.0.join("a").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        symlink(fixture.0.join("absent"), fixture.0.join("link")).unwrap();
+        assert_eq!(
+            vex(&fixture.0, &["--message-file", "link", "--help"])
+                .status
+                .code(),
+            Some(5)
+        );
+        assert!(!fixture.0.join("absent").exists());
+        assert!(vex(&fixture.0, &["--message-file", "private", "--help"])
+            .status
+            .success());
+        assert_eq!(
+            fs::metadata(fixture.0.join("private"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+    }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn internal_outcomes_are_reported_as_vex_failures() {
+    let fixture = TestDir::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&fixture.0)
+        .args(["--message-file", "internal.jsonl", "info"])
+        .env("VEX_TEST_INTERNAL_FAILURE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let text = fs::read_to_string(fixture.0.join("internal.jsonl")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(last["category"], "internal");
+    assert_eq!(last["origin"], "vex");
+}
+
+#[test]
+fn message_diagnostics_redact_credential_bearing_arguments() {
+    let fixture = TestDir::new();
+    let output = vex(
+        &fixture.0,
+        &[
+            "--message-file",
+            "redacted.jsonl",
+            "info",
+            "https://login:secret_contract_value@example.invalid/repo?token=secret_query_value",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let text = fs::read_to_string(fixture.0.join("redacted.jsonl")).unwrap();
+    for secret in ["login", "secret_contract_value", "secret_query_value"] {
+        assert!(!text.contains(secret), "credential exposed in report");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+    }
+    assert!(text.contains("example.invalid"));
 }

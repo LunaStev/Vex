@@ -1,3 +1,4 @@
+use diagnostic::Error;
 use std::collections::BTreeSet;
 
 use lockfile::{
@@ -10,8 +11,8 @@ mod graph;
 mod paths;
 mod transaction;
 
-pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), String> {
-    transaction::recover(guard.root(), dry_run)
+pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), Error> {
+    transaction::recover(guard.root(), dry_run).map_err(Error::environment)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -77,7 +78,7 @@ pub fn resolve<F>(
     manifest: &Manifest,
     options: ResolveOptions,
     mut status: F,
-) -> Result<Resolution, String>
+) -> Result<Resolution, Error>
 where
     F: FnMut(&str, String),
 {
@@ -89,26 +90,40 @@ where
     }
 
     if options.update.is_update() && options.locked {
-        return Err("`--locked` cannot be used while updating dependencies".to_string());
+        return Err(Error::resolution(
+            "`--locked` cannot be used while updating dependencies".to_string(),
+        ));
     }
     if options.update.is_update() && options.offline {
-        return Err("`--offline` cannot be used while updating Git dependencies".to_string());
+        return Err(Error::resolution(
+            "`--offline` cannot be used while updating Git dependencies".to_string(),
+        ));
     }
 
-    let guard = state::Guard::acquire(options.dry_run, &mut status)?;
+    let guard = state::Guard::acquire(options.dry_run, &mut status).map_err(Error::environment)?;
     recover_project(&guard, options.dry_run)?;
     let existing = read_lockfile()?;
+    let missing_lockfile = existing.is_none();
+    if options.locked
+        && existing.as_ref().is_some_and(|lock| {
+            lock.packages.iter().any(|package| {
+        matches!(&package.source, LockedSource::Git { url, .. } if source::identity(url) != *url)
+    })
+        })
+    {
+        return Err(Error::resolution("vex.lock contains source authentication; --locked preserves it unchanged\nhelp: run vex fetch to migrate the lockfile, then remove credentials from version-control history"));
+    }
     if options.locked {
         let lockfile = existing.as_ref().ok_or_else(|| {
-            format!(
+            Error::resolution(format!(
                 "`{LOCKFILE_NAME}` is required by `--locked`\nhelp: run `vex fetch` and commit `{LOCKFILE_NAME}`"
-            )
+            ))
         })?;
         if lockfile.version != 2 && lockfile.version != LOCKFILE_VERSION {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "`{LOCKFILE_NAME}` version {} cannot be used with `--locked`; expected version {LOCKFILE_VERSION}\nhelp: run `vex fetch` to regenerate the lockfile",
                 lockfile.version
-            ));
+            )));
         }
     }
     let existing = existing.unwrap_or_else(Lockfile::empty);
@@ -141,13 +156,13 @@ where
         );
         // Local discovery must reuse pinned sources even for selected names.
         preflight.local_preflight();
-        preflight.resolve_manifest_dependencies(manifest).map_err(|e| format!("cannot validate update names from the local current graph: {e}\nhelp: run `vex fetch` first"))?;
+        preflight.resolve_manifest_dependencies(manifest).map_err(|e| Error::new(e.category, format!("cannot validate update names from the local current graph: {e}\nhelp: run `vex fetch` first")))?;
         preflight.validate_selected_packages()?;
     }
     let transaction = if dry_run {
         None
     } else {
-        Some(transaction::Transaction::new(&root)?)
+        Some(transaction::Transaction::new(&root).map_err(Error::environment)?)
     };
     let physical_deps = transaction
         .as_ref()
@@ -178,16 +193,17 @@ where
     }
     .normalized();
 
-    if resolved != existing {
+    let needs_lockfile = missing_lockfile || resolved != existing;
+    if needs_lockfile {
         if locked {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "`{LOCKFILE_NAME}` needs to be updated, but `--locked` prevents changes\nhelp: run `vex fetch` and commit the updated `{LOCKFILE_NAME}`"
-            ));
+            )));
         }
         if dry_run {
-            return Err(format!(
+            return Err(Error::resolution(format!(
                 "dependency graph differs from `{LOCKFILE_NAME}`\nhelp: run `vex fetch` to resolve and lock dependencies"
-            ));
+            )));
         }
         status(
             "Locking",
@@ -204,7 +220,9 @@ where
     }
 
     if let Some(transaction) = transaction {
-        transaction.publish((resolved != existing).then(|| lockfile::encode(resolved.clone())))?;
+        transaction
+            .publish(needs_lockfile.then(|| lockfile::encode(resolved.clone())))
+            .map_err(Error::environment)?;
     }
 
     Ok(Resolution {
