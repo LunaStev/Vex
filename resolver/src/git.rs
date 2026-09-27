@@ -13,7 +13,7 @@ pub(crate) fn ensure_repository(
     url: &str,
     name: &str,
     status: &mut dyn FnMut(&str, String),
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     validate_managed_checkout_path(destination)?;
     if destination.exists() {
         if !destination.join(".git").is_dir() {
@@ -23,7 +23,7 @@ pub(crate) fn ensure_repository(
             )));
         }
         verify_origin(destination, url)?;
-        return Ok(());
+        return Ok(false);
     }
 
     let parent = destination.parent().ok_or_else(|| {
@@ -36,12 +36,39 @@ pub(crate) fn ensure_repository(
         Error::environment(format!("failed to create `{}`: {error}", parent.display()))
     })?;
     status("Cloning", format!("{name} ({url})"));
-    run(
-        command()
-            .args(["clone", "--", url])
-            .arg(git_cli_path(destination).as_ref()),
-        "clone Git dependency",
-    )?;
+    // clone exports an absolute GIT_DIR to index-pack, whose Windows setup has
+    // a separate fixed-length guard even with core.longpaths. Initialize deep
+    // candidates without transport, then let resolution fetch/checkout through
+    // command_in's relative .git. Apply this path on all hosts for coverage.
+    let unborn = destination.as_os_str().len() > 200;
+    if unborn {
+        let advertised = stdout(
+            command().args(["ls-remote", "--", url]),
+            "inspect Git object format",
+        )?;
+        let format = advertised_object_format(&advertised)?;
+        run(
+            command()
+                .args(["init", &format!("--object-format={format}"), "--"])
+                .arg(git_cli_path(destination).as_ref()),
+            "initialize Git dependency",
+        )?;
+        run(
+            command_in(destination).args([
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ]),
+            "configure Git dependency refs",
+        )?;
+    } else {
+        run(
+            command()
+                .args(["clone", "--", url])
+                .arg(git_cli_path(destination).as_ref()),
+            "clone Git dependency",
+        )?;
+    }
     // Let Git apply the user's transport rewrites to the original declaration,
     // then remove authentication before a candidate can be published.
     run(
@@ -52,7 +79,33 @@ pub(crate) fn ensure_repository(
             &source::identity(url),
         ]),
         "store credential-free Git origin",
-    )
+    )?;
+    Ok(unborn)
+}
+
+fn advertised_object_format(advertised: &str) -> Result<&'static str, Error> {
+    let mut width = None;
+    for line in advertised.lines() {
+        let (oid, _) = line
+            .split_once('\t')
+            .ok_or_else(|| Error::resolution("invalid Git ref advertisement"))?;
+        if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::resolution(
+                "unsupported Git object format in ref advertisement",
+            ));
+        }
+        if width.is_some_and(|value| value != oid.len()) {
+            return Err(Error::resolution(
+                "inconsistent Git object formats in ref advertisement",
+            ));
+        }
+        width = Some(oid.len());
+    }
+    match width {
+        Some(40) => Ok("sha1"),
+        Some(64) => Ok("sha256"),
+        _ => Err(Error::resolution("Git source advertises no revisions")),
+    }
 }
 
 pub(crate) fn require_local_repository(
@@ -214,13 +267,22 @@ pub(crate) fn is_detached(destination: &Path) -> Result<bool, Error> {
     }
 }
 
-pub(crate) fn checkout_commit(destination: &Path, name: &str, commit: &str) -> Result<(), Error> {
+pub(crate) fn checkout_commit(
+    destination: &Path,
+    name: &str,
+    commit: &str,
+    unborn: bool,
+) -> Result<(), Error> {
     reject_dirty_checkout(destination, name)?;
-    let current = stdout(
-        command_in(destination).args(["rev-parse", "HEAD"]),
-        "read Git dependency HEAD",
-    )?;
-    if current == commit {
+    let current = if unborn {
+        None
+    } else {
+        Some(stdout(
+            command_in(destination).args(["rev-parse", "HEAD"]),
+            "read Git dependency HEAD",
+        )?)
+    };
+    if current.as_deref() == Some(commit) {
         let head = command_in(destination)
             .args(["symbolic-ref", "--quiet", "HEAD"])
             .supervised_output()
@@ -270,8 +332,9 @@ pub(crate) fn command_in(destination: &Path) -> Command {
     let mut command = command();
     let path = git_cli_path(destination);
     command.arg("-C").arg(path.as_ref());
-    command.arg("--git-dir").arg(path.join(".git"));
-    command.arg("--work-tree").arg(path.as_ref());
+    // -C already selects the checkout. Relative arguments avoid Git's fixed
+    // GIT_DIR length guard and remain correct in its spawned Git children.
+    command.args(["--git-dir", ".git", "--work-tree", "."]);
     command
 }
 
@@ -405,5 +468,33 @@ impl GitOutput for Command {
             Err(_) => return Err(Error::environment("VEX_GIT_TIMEOUT must be UTF-8")),
         };
         process::output(self, Duration::from_secs(seconds)).map_err(Error::environment)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ref_advertisements_select_hash_format_and_reject_ambiguous_data() {
+        for (width, expected) in [(40, "sha1"), (64, "sha256")] {
+            let oid = "a".repeat(width);
+            assert_eq!(
+                advertised_object_format(&format!("{oid}\tHEAD\n{oid}\trefs/tags/v1^{{}}\n"))
+                    .unwrap(),
+                expected
+            );
+        }
+        for invalid in [
+            String::new(),
+            "not-a-ref".into(),
+            "zz\tHEAD\n".into(),
+            format!(
+                "{}\tHEAD\n{}\trefs/heads/main\n",
+                "a".repeat(40),
+                "b".repeat(64)
+            ),
+        ] {
+            assert!(advertised_object_format(&invalid).is_err());
+        }
     }
 }

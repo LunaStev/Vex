@@ -998,55 +998,80 @@ fn missing_revision_is_resolution_but_unavailable_transport_is_environment() {
 
 #[test]
 fn long_managed_paths_support_clone_update_and_locked_offline_reuse() {
-    let fixture = TestDir::new();
-    let dep = fixture.path().join("dep");
-    create_package(&dep, "dep", &[]);
-    let nested_file = Path::new("src/nested_directory_one/nested_directory_two/value.wave");
-    fs::create_dir_all(dep.join(nested_file).parent().unwrap()).unwrap();
-    fs::write(dep.join(nested_file), "pub fun value() {}\n").unwrap();
-    init_git(&dep);
-    let initial = commit_all(&dep, "initial long-path fixture");
+    for object_format in ["sha1", "sha256"] {
+        let fixture = TestDir::new();
+        let dep = fixture.path().join("dep");
+        create_package(&dep, "dep", &[]);
+        let nested_file = Path::new("src/nested_directory_one/nested_directory_two/value.wave");
+        fs::create_dir_all(dep.join(nested_file).parent().unwrap()).unwrap();
+        fs::write(dep.join(nested_file), "pub fun value() {}\n").unwrap();
+        git_stdout(
+            &dep,
+            &[
+                "init",
+                "-b",
+                "master",
+                &format!("--object-format={object_format}"),
+            ],
+        );
+        let initial = commit_all(&dep, "initial long-path fixture");
 
-    let mut app = fixture.path().to_path_buf();
-    while app.as_os_str().len() < 170 {
-        app.push("nested project directory");
-    }
-    app.push("app");
-    create_package(&app, "app", &[("dep", git_url(&dep), Some("master"))]);
-    let config = fixture.path().join("longpaths-disabled.gitconfig");
-    fs::write(&config, "[core]\n\tlongpaths = false\n").unwrap();
-    let original_config = fs::read(&config).unwrap();
-    let fetch = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_vex"))
-            .current_dir(&app)
-            .args(args)
+        let mut app = fixture.path().to_path_buf();
+        while app.as_os_str().len() < 170 {
+            app.push("nested project directory");
+        }
+        app.push("app");
+        create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+        let config = fixture.path().join("longpaths-disabled.gitconfig");
+        fs::write(&config, "[core]\n\tlongpaths = false\n").unwrap();
+        let original_config = fs::read(&config).unwrap();
+        let fetch = |args: &[&str]| {
+            let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+                .current_dir(&app)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", &config)
+                .output()
+                .unwrap();
+            assert_success(&output, "managed Git operation beyond MAX_PATH");
+        };
+        fetch(&["fetch"]);
+        let lock = lockfile::decode(&read_lock(&app)).unwrap();
+        let lockfile::LockedSource::Git { resolved, .. } = &lock.packages[0].source else {
+            panic!()
+        };
+        let checkout = app.join(resolved);
+        assert!(checkout.join(nested_file).as_os_str().len() > 260);
+        assert_eq!(
+            fs::read(checkout.join(nested_file)).unwrap(),
+            b"pub fun value() {}\n"
+        );
+        assert!(read_lock(&app).contains(&initial));
+        fetch(&["fetch", "--locked", "--offline"]);
+
+        fs::write(dep.join(nested_file), "pub fun updated() {}\n").unwrap();
+        let updated = commit_all(&dep, "update long-path fixture");
+        fetch(&["update", "dep"]);
+        assert!(read_lock(&app).contains(&updated));
+        assert_eq!(
+            fs::read(checkout.join(nested_file)).unwrap(),
+            b"pub fun updated() {}\n"
+        );
+        fetch(&["fetch", "--locked", "--offline"]);
+        let locked_bytes = fs::read(app.join("vex.lock")).unwrap();
+        let restored = app.join("restored");
+        create_package(&restored, "app", &[("dep", git_url(&dep), None)]);
+        fs::write(restored.join("vex.lock"), &locked_bytes).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .current_dir(&restored)
+            .args(["fetch", "--locked"])
             .env("GIT_CONFIG_GLOBAL", &config)
             .output()
             .unwrap();
-        assert_success(&output, "managed Git operation beyond MAX_PATH");
-    };
-    fetch(&["fetch"]);
-    let lock = lockfile::decode(&read_lock(&app)).unwrap();
-    let lockfile::LockedSource::Git { resolved, .. } = &lock.packages[0].source else {
-        panic!()
-    };
-    let checkout = app.join(resolved);
-    assert!(checkout.join(nested_file).as_os_str().len() > 260);
-    assert_eq!(
-        fs::read(checkout.join(nested_file)).unwrap(),
-        b"pub fun value() {}\n"
-    );
-    assert!(read_lock(&app).contains(&initial));
-    fetch(&["fetch", "--locked", "--offline"]);
-
-    fs::write(dep.join(nested_file), "pub fun updated() {}\n").unwrap();
-    let updated = commit_all(&dep, "update long-path fixture");
-    fetch(&["update", "dep"]);
-    assert!(read_lock(&app).contains(&updated));
-    assert_eq!(
-        fs::read(checkout.join(nested_file)).unwrap(),
-        b"pub fun updated() {}\n"
-    );
-    fetch(&["fetch", "--locked", "--offline"]);
-    assert_eq!(fs::read(config).unwrap(), original_config);
+        assert_success(
+            &result,
+            "restore a pinned checkout through deep-path initialization",
+        );
+        assert_eq!(fs::read(restored.join("vex.lock")).unwrap(), locked_bytes);
+        assert_eq!(fs::read(config).unwrap(), original_config);
+    }
 }

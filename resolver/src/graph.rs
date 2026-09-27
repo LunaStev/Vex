@@ -509,11 +509,11 @@ impl<'a> Resolver<'a> {
                 ))
             })?;
             git::require_local_repository(destination, url, &dependency.name, &commit)?;
-            git::checkout_commit(destination, &dependency.name, &commit)?;
+            git::checkout_commit(destination, &dependency.name, &commit, false)?;
             return Ok(commit);
         }
 
-        git::ensure_repository(destination, url, &dependency.name, &mut *self.status)?;
+        let unborn = git::ensure_repository(destination, url, &dependency.name, &mut *self.status)?;
         git::reject_dirty_checkout(destination, &dependency.name)?;
 
         if let Some(commit) = locked {
@@ -526,7 +526,7 @@ impl<'a> Resolver<'a> {
                     )));
                 }
             }
-            git::checkout_commit(destination, &dependency.name, &commit)?;
+            git::checkout_commit(destination, &dependency.name, &commit, unborn)?;
             return Ok(commit);
         }
 
@@ -543,7 +543,7 @@ impl<'a> Resolver<'a> {
             "refs/remotes/origin/HEAD^{commit}".to_string()
         };
         let commit = git::resolve_reference(destination, &reference)?;
-        git::checkout_commit(destination, &dependency.name, &commit)?;
+        git::checkout_commit(destination, &dependency.name, &commit, unborn)?;
         Ok(commit)
     }
 }
