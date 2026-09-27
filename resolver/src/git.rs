@@ -47,10 +47,14 @@ pub(crate) fn ensure_repository(
             "inspect Git object format",
         )?;
         let format = advertised_object_format(&advertised)?;
+        fs::create_dir(destination).map_err(Error::environment)?;
         run(
-            command()
-                .args(["init", &format!("--object-format={format}"), "--"])
-                .arg(git_cli_path(destination).as_ref()),
+            command().current_dir(destination).args([
+                "init",
+                &format!("--object-format={format}"),
+                "--",
+                ".",
+            ]),
             "initialize Git dependency",
         )?;
         run(
@@ -330,10 +334,11 @@ pub(crate) fn reject_dirty_checkout(destination: &Path, name: &str) -> Result<()
 
 pub(crate) fn command_in(destination: &Path) -> Command {
     let mut command = command();
-    let path = git_cli_path(destination);
-    command.arg("-C").arg(path.as_ref());
-    // -C already selects the checkout. Relative arguments avoid Git's fixed
-    // GIT_DIR length guard and remain correct in its spawned Git children.
+    // Let Rust/Win32 select the extended-length working directory. Git's -C
+    // and init <absolute-path> chdir paths still have a MAX_PATH limitation.
+    command.current_dir(destination);
+    // Relative arguments avoid Git's fixed GIT_DIR length guard and remain
+    // correct in its spawned Git children.
     command.args(["--git-dir", ".git", "--work-tree", "."]);
     command
 }
@@ -360,7 +365,7 @@ fn command() -> Command {
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
-    // A hook or parent tool can export repository-local context that overrides -C.
+    // A hook or parent tool can export repository-local context that overrides the selected checkout.
     // Keep authentication, SSH, proxies, HOME, and user config (including URL
     // rewrites) intact; remove only repository selection/object/index context.
     for variable in [
