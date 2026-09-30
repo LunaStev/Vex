@@ -7,3 +7,5 @@ pub mod run;
 pub mod setup;
 pub mod tree;
 pub mod update;
+
+pub mod metadata;

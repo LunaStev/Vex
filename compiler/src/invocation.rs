@@ -1,7 +1,8 @@
 use diagnostic::Error;
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::{env, fs};
 
 use crate::plan;
 
@@ -9,7 +10,7 @@ use crate::plan;
 /// here: the caller must drop its resolution/guard before calling execute().
 pub struct Execution {
     program: String,
-    args: Vec<String>,
+    args: Vec<OsString>,
 }
 impl Execution {
     pub fn execute(self) -> Result<ExitStatus, Error> {
@@ -19,7 +20,9 @@ impl Execution {
 }
 
 pub fn run_build_with_dry_run(
+    compiler: &crate::Compiler,
     args: &[String],
+    runtime: &[OsString],
     user_requested_dry_run: bool,
     generation: Option<&Path>,
 ) -> Result<Option<Execution>, Error> {
@@ -28,19 +31,12 @@ pub fn run_build_with_dry_run(
         insert_build_flag(&mut dry_run_args, "--dry-run");
     }
     insert_build_flag(&mut dry_run_args, "--error-format=json");
-    let wavec = wavec_path();
-    let validation_output = run_wavec_dry_run(&wavec, &dry_run_args)?;
-    let plan = plan::validate_dry_run_json_output(&validation_output.stdout, &validation_output.stderr)
+    let wavec = &compiler.path;
+    let validation_output = run_wavec_dry_run(wavec, &dry_run_args)?;
+    let mut plan = plan::validate_dry_run_json_output(&validation_output.stdout, &validation_output.stderr)
         .map_err(|error| Error::compiler(format!("installed wavec is incompatible with Vex: {error}\nhelp: update wavec or set VEX_WAVEC=/path/to/wavec")))?;
     if !validation_output.stderr.is_empty() {
         eprint!("{}", String::from_utf8_lossy(&validation_output.stderr));
-    }
-    if user_requested_dry_run {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&plan).map_err(Error::internal)?
-        );
-        return Ok(None);
     }
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let is_run = args[..separator].iter().any(|a| a == "--run");
@@ -66,41 +62,57 @@ pub fn run_build_with_dry_run(
             .to_owned();
         let run_args = plan::string_array(&plan["execute"]["args"], "execute.args")
             .map_err(Error::compiler)?;
-        let expected = if separator < args.len() {
-            &args[separator + 1..]
-        } else {
-            &[]
-        };
         if program == output {
-            if run_args != expected {
+            if !run_args.is_empty() {
                 return Err(Error::compiler(
-                    "native execution plan changed runtime arguments",
+                    "native execution plan added runtime arguments",
                 ));
             }
-        } else if !run_args.ends_with(expected)
-            || !run_args[..run_args.len() - expected.len()]
-                .iter()
-                .any(|a| a == output)
-        {
-            return Err(Error::compiler("runner plan does not reference the generated artifact and original runtime arguments"));
+        } else if !run_args.iter().any(|a| a == output) {
+            return Err(Error::compiler(
+                "runner plan does not reference the generated artifact",
+            ));
         }
+        let mut execution_args: Vec<OsString> = run_args.into_iter().map(OsString::from).collect();
+        execution_args.extend_from_slice(runtime);
         Some((
             Execution {
                 program,
-                args: run_args,
+                args: execution_args,
             },
             PathBuf::from(output),
         ))
     } else {
         None
     };
+    if user_requested_dry_run {
+        if !runtime.is_empty() {
+            let values = runtime
+                .iter()
+                .map(|arg| {
+                    arg.to_str().map(str::to_owned).ok_or_else(|| {
+                        Error::usage("dry-run JSON cannot represent non-UTF-8 program arguments")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let args = plan["execute"]["args"]
+                .as_array_mut()
+                .ok_or_else(|| Error::compiler("run plan is missing execute.args"))?;
+            args.extend(values.into_iter().map(serde_json::Value::String));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan).map_err(Error::internal)?
+        );
+        return Ok(None);
+    }
     state::ensure_dir(Path::new("target")).map_err(Error::environment)?;
     let compile_args: Vec<_> = args[..separator]
         .iter()
         .filter(|a| a.as_str() != "--run")
         .collect();
     let status =
-        process::status(Command::new(&wavec).args(compile_args), None, false).map_err(|e| {
+        process::status(Command::new(wavec).args(compile_args), None, false).map_err(|e| {
             Error::environment(format!(
                 "failed to execute `{}` build: {e}",
                 wavec.display()
@@ -183,7 +195,7 @@ fn insert_build_flag(args: &mut Vec<String>, flag: &str) {
     }
 }
 
-fn compiler_error(status: ExitStatus, message: String) -> Error {
+pub(crate) fn compiler_error(status: ExitStatus, message: String) -> Error {
     // wavec reserves 3 for missing backend tools / environment / IO failures.
     // Its usage rejection is still a compiler interface failure, not Vex CLI usage.
     if status.code() == Some(3) {
@@ -246,21 +258,4 @@ fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
         (true, false) => stderr.trim().to_string(),
         (true, true) => "<no output>".to_string(),
     }
-}
-
-fn wavec_path() -> PathBuf {
-    env::var_os("VEX_WAVEC")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let filename = if cfg!(windows) { "wavec.exe" } else { "wavec" };
-            let on_path = env::var_os("PATH").is_some_and(|path| {
-                env::split_paths(&path).any(|directory| directory.join(filename).is_file())
-            });
-            if on_path {
-                PathBuf::from(filename)
-            } else {
-                toolchain::managed_wavec().unwrap_or_else(|| PathBuf::from(filename))
-            }
-        })
 }

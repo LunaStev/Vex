@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod messages;
 mod outcome;
+mod project;
 mod ui;
 
 fn main() {

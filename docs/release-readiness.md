@@ -70,7 +70,7 @@ Each real run allocates `target/.vex-run/<unique generation>/`. Vex validates a
 single JSON plan, compiles without `--run`, checks the produced artifact, drops
 the dependency/build guard, and only then spawns the program or compiler-selected
 runner with structured arguments. Node/WASM and QEMU runners are not converted to
-shell command strings. Runtime cwd, environment and stdio remain inherited; the
+shell command strings. Runtime cwd is the selected project root; environment and stdio remain inherited; the
 program exit code is preserved (Unix signal exits use `128 + signal`).
 
 Run generations have no automatic GC. This also avoids assuming that all runtime
@@ -112,3 +112,32 @@ The subsequent [production hardening changes](production-hardening.md) add bound
 Git execution, cancellation, safe compiler artifact installation, dependency
 scanning and release provenance. Their native CI acceptance remains required
 before release; a local cross-compile is not that evidence.
+
+## Wave 0.2.1 compatibility acceptance
+
+The next planned compatible Wave release is `v0.2.1-pre-beta` on October 5, 2026.
+Until its official artifact exists, a local development-compiler smoke is development
+evidence only. It does not establish the artifact's compatibility or exact source
+commit, and it does not replace native CI. No compiler source-build gate is added.
+
+Use the release's verified official host artifact, record its archive SHA-256 and
+provenance result, then run:
+
+```sh
+python3 tests/wave_compatibility.py --vex target/debug/vex \
+  --wavec-bin /path/to/verified/compiler/bin --reexports \
+  --expected-version 0.2.1-pre-beta
+```
+
+The smoke records the executable SHA-256; `--expected-sha256` can pin that
+executable on subsequent runs. It is distinct from the archive SHA-256. The suite
+checks PATH selection, compiler capabilities, one JSON dry-run plan, ancestor and
+explicit project selection, Hello World, direct/transitive package imports,
+public reexports, private-symbol rejection, locked/offline reuse and metadata.
+The local Git remote is removed before offline checks. Missing backend/runtime
+prerequisites must fail the smoke rather than silently skip it.
+
+After validating the official artifact and its required host dependencies, pin
+its verified identity in compiler CI and activate the required gate (#66/#131).
+That activation and native release/lockfile acceptance (#75/#79) remain release
+work; passing local Rust tests or a development compiler does not close them.

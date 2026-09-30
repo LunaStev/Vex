@@ -13,10 +13,14 @@ struct DependencyOptions {
     packages: BTreeSet<String>,
 }
 
-pub fn fetch(args: &[String]) -> Result<(), Error> {
-    dependency_command(false, args)
+pub fn fetch(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
+    dependency_command(false, args, selection)
 }
-pub(super) fn dependency_command(update: bool, args: &[String]) -> Result<(), Error> {
+pub(super) fn dependency_command(
+    update: bool,
+    args: &[String],
+    selection: &crate::project::Selection,
+) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!(
             "usage: vex {}",
@@ -37,6 +41,7 @@ pub(super) fn dependency_command(update: bool, args: &[String]) -> Result<(), Er
         };
         return Err(Error::usage(format!("`{option}` cannot be used with `vex update` because update refreshes Git refs and rewrites vex.lock")));
     }
+    let _project = selection.enter()?;
     run_fetch(update, options)
 }
 

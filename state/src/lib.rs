@@ -15,18 +15,35 @@ pub struct Guard {
 
 impl Guard {
     pub fn acquire(shared: bool, mut waiting: impl FnMut(&str, String)) -> Result<Self, String> {
+        Self::acquire_mode(shared, true, &mut waiting)
+    }
+
+    /// Read an already coordinated project without creating or repairing state.
+    pub fn acquire_existing(mut waiting: impl FnMut(&str, String)) -> Result<Self, String> {
+        Self::acquire_mode(true, false, &mut waiting)
+    }
+
+    fn acquire_mode(
+        shared: bool,
+        create: bool,
+        waiting: &mut impl FnMut(&str, String),
+    ) -> Result<Self, String> {
         process::install_handlers()?;
         let root = std::env::current_dir()
             .and_then(|p| p.canonicalize())
             .map_err(|e| e.to_string())?;
         let managed = root.join(".vex");
-        ensure_dir(&managed)?;
+        if create {
+            ensure_dir(&managed)?;
+        } else {
+            reject_link(&managed)?;
+        }
         let path = managed.join("state.lock");
         reject_link(&path)?;
-        let file = acquire_file(&path, shared, || {
+        let file = acquire_file(&path, shared, create, || {
             waiting("Waiting", format!("project state in {}", root.display()))
         })
-        .map_err(|e| format!("cannot coordinate project state: {e}; refusing unlocked access"))?;
+        .map_err(|e| format!("cannot coordinate project state: {e}; refusing unlocked access; run `vex fetch` first"))?;
         if !file.metadata().map_err(|e| e.to_string())?.is_file() {
             return Err("project coordination path must be a regular file".into());
         }
@@ -80,12 +97,17 @@ pub fn ensure_dir(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn acquire_file(path: &Path, shared: bool, waiting: impl FnOnce()) -> io::Result<File> {
+fn acquire_file(
+    path: &Path,
+    shared: bool,
+    create: bool,
+    waiting: impl FnOnce(),
+) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = OpenOptions::new()
         .read(true)
-        .write(true)
-        .create(true)
+        .write(create)
+        .create(create)
         .truncate(false)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
@@ -117,7 +139,12 @@ fn acquire_file(path: &Path, shared: bool, waiting: impl FnOnce()) -> io::Result
 }
 
 #[cfg(windows)]
-fn acquire_file(path: &Path, shared: bool, waiting: impl FnOnce()) -> io::Result<File> {
+fn acquire_file(
+    path: &Path,
+    shared: bool,
+    create: bool,
+    waiting: impl FnOnce(),
+) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     let mut waiting = Some(waiting);
     loop {
@@ -134,7 +161,7 @@ fn acquire_file(path: &Path, shared: bool, waiting: impl FnOnce()) -> io::Result
             .open(path);
         match result {
             Ok(file) => return Ok(file),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(e) if create && e.kind() == io::ErrorKind::NotFound => {
                 match OpenOptions::new()
                     .read(true)
                     .write(true)

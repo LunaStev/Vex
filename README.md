@@ -103,9 +103,29 @@ vex fetch [--locked] [--offline]
 vex update [<package>...]
 vex info
 vex tree [--locked] [--offline]
+vex metadata [--format=json] [--locked] [--offline]
 vex setup wavec [--version <version>] [--script-fallback]
 vex --version
 ```
+
+Project commands search the current directory and its physical ancestors for the
+nearest `vex.ws`. An invalid nearest manifest is an error, not a reason to select
+another project. `--manifest-path <path/to/vex.ws>` takes precedence and accepts
+relative or absolute paths before or after the command. Dependency paths, build
+outputs and the program started by `vex run` are relative to that project root.
+`init` always uses the invocation directory. Help needs no project.
+
+```sh
+vex --manifest-path ../app/vex.ws check --locked --offline
+vex metadata --format=json
+```
+
+`metadata` writes one versioned JSON document to stdout, without invoking wavec,
+fetching, migrating or repairing project state. It uses an existing shared state
+lock; run `vex fetch` first when the local graph or coordination state is missing.
+`--locked` also enforces lockfile compatibility; metadata preserves v2/v3 bytes
+with or without that flag. `--offline` is accepted and is already the default.
+See [the metadata v1 contract](docs/metadata.md) for fields and ordering.
 
 ## Project Layout
 
@@ -294,6 +314,19 @@ Use Git credential helpers or SSH agents to avoid credentials in your manifest.
 
 Vex uses `wavec` internally and validates the compiler dry-run plan before executing a real build. Vex commands stay manifest-based; raw compiler flags belong to `wavec`, not to Vex.
 
+An explicit target is checked against the selected compiler's
+`print supported-targets --format=json` response before dependency resolution.
+Capabilities are cached only within the current Vex invocation. An empty or
+whitespace-only `VEX_WAVEC` is an error; unset it to use automatic selection.
+Relative compiler paths are anchored at the invocation directory.
+
+Arguments after `vex run --` are passed as OS strings directly to the program or
+compiler-selected runner, including empty arguments, whitespace and Unicode.
+They are not interpreted as Vex options or sent through the compiler JSON plan.
+Non-UTF-8 program arguments work on supported OS interfaces; a dry-run JSON plan
+cannot represent them and fails explicitly. Compiler input/dependency paths
+that the JSON/WSON protocols cannot represent also fail instead of being replaced.
+
 Build progress is written to stderr with Cargo-style stages such as `Resolving`, `Fetching`, `Compiling`, `Checking`, `Running`, and `Finished`. Program output remains on stdout.
 
 Examples:
@@ -341,7 +374,7 @@ make a command read-only. Help and info do not create coordination state.
 Dry-run uses shared protection and may create only `.vex/` and its coordination
 file. It never fetches, repairs dependencies, creates target output, or rewrites
 the lockfile. Its single compiler planning call returns validated JSON on stdout;
-this diagnostic compiler plan is not the future Vex metadata API.
+this diagnostic compiler plan is separate from the versioned `vex metadata` API.
 
 Git candidates are staged and fully validated before publication. Existing
 checkouts and backup/recovery records remain under `.vex/`; lockfile replacement
@@ -373,7 +406,7 @@ Vex/
 ├── manifest/     # vex.ws parsing and rendering
 ├── lockfile/     # vex.lock parsing, rendering, and storage
 ├── resolver/     # dependency graph, Git, and path resolution
-├── compiler/     # wavec invocation, plans, and argument validation
+├── compiler/     # wavec selection, capabilities, plans, and invocation
 ├── toolchain/    # platform-specific wavec installation
 ├── state/        # project locks, init recovery, and publication primitives
 ├── process/      # bounded child execution and cancellation

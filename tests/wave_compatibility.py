@@ -6,6 +6,8 @@
 """Real-compiler smoke, deliberately separate from the network-free Rust suite."""
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -27,14 +29,27 @@ def main():
     parser.add_argument("--vex", type=Path, required=True)
     parser.add_argument("--wavec-bin", type=Path, required=True)
     parser.add_argument("--reexports", action="store_true")
+    parser.add_argument("--expected-version", help="Require this exact compiler version token")
+    parser.add_argument("--expected-sha256", help="Require this compiler executable SHA-256 (not the archive digest)")
     args = parser.parse_args()
     vex = str(args.vex.resolve())
+    compiler = args.wavec_bin.resolve() / ("wavec.exe" if os.name == "nt" else "wavec")
+    digest = hashlib.sha256(compiler.read_bytes()).hexdigest()
+    print(f"wavec executable: {compiler}\nwavec executable SHA-256: {digest}", flush=True)
+    if args.expected_sha256 and digest != args.expected_sha256.lower():
+        raise RuntimeError("compiler executable SHA-256 does not match the selected artifact")
     env = os.environ.copy()
     env.pop("VEX_WAVEC", None)
     env["PATH"] = str(args.wavec_bin.resolve()) + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory(prefix="vex-wave-compat-") as temporary:
         root = Path(temporary)
-        run(["wavec", "--version"], root, env)
+        version = run(["wavec", "--version"], root, env)
+        if args.expected_version and version.stdout.split()[:2] != ["wavec", args.expected_version]:
+            raise RuntimeError("compiler version does not match the selected release")
+        capabilities = run(["wavec", "print", "supported-targets", "--format=json"], root, env)
+        targets = json.loads(capabilities.stdout)
+        if not isinstance(targets, list) or not targets or not all(isinstance(t, str) and t for t in targets):
+            raise RuntimeError("invalid supported-targets response")
         app, middle, leaf = [root / name for name in ("app", "middle", "leaf")]
         for package in (app, middle, leaf):
             package.mkdir()
@@ -43,6 +58,20 @@ def main():
             result = run([vex, command, "--locked", "--offline"], app, env)
             if command == "run" and "Hello World" not in result.stdout:
                 raise RuntimeError("Hello World was not printed through PATH wavec")
+        nested = app / "src/nested"
+        nested.mkdir()
+        result = run([vex, "run", "--locked", "--offline"], nested, env)
+        if "Hello World" not in result.stdout:
+            raise RuntimeError("ancestor-selected run did not execute the root package")
+        result = run([vex, "--manifest-path", str(app / "vex.ws"), "check", "--locked", "--offline"], root, env)
+        for command in ("build", "check", "run"):
+            result = run([vex, command, "--dry-run", "--locked", "--offline"], nested, env)
+            plan = json.loads(result.stdout)
+            if plan["schema_version"] != 1 or plan["target"] not in targets:
+                raise RuntimeError("compiler plan disagrees with capabilities")
+            if command == "build":
+                host_target = plan["target"]
+        run([vex, "check", "--target", host_target, "--locked", "--offline"], nested, env)
         rejected = run([vex, "build", "--emit=obj"], app, env, succeeds=False)
         if "unknown Vex option" not in rejected.stderr:
             raise RuntimeError("raw compiler option was not rejected by Vex")
@@ -83,6 +112,15 @@ def main():
                 raise RuntimeError("dependency graph did not produce 42")
             if (app / "vex.lock").read_bytes() != locked:
                 raise RuntimeError("locked/offline command changed vex.lock")
+        metadata = run([vex, "metadata", "--locked", "--offline"], nested, env)
+        graph = json.loads(metadata.stdout)
+        repeated = run([vex, "--manifest-path", str(app / "vex.ws"), "metadata"], root, env)
+        if metadata.stdout != repeated.stdout or graph["schema_version"] != 1:
+            raise RuntimeError("metadata changed with project-selection method")
+        if graph["root"]["dependencies"] != ["middle"] or [p["name"] for p in graph["packages"]] != ["leaf", "middle"]:
+            raise RuntimeError("metadata omitted the transitive graph")
+        if (app / "vex.lock").read_bytes() != locked:
+            raise RuntimeError("metadata changed vex.lock")
         if args.reexports:
             (middle / "src/lib.wave").write_text('pub import("leaf")::{hidden};\n', encoding="utf-8")
             (app / "src/main.wave").write_text('import("middle")::{hidden};\nfun main() { var result: i32 = hidden(); println("{}", result); }\n', encoding="utf-8")

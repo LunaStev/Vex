@@ -1,7 +1,7 @@
 use diagnostic::Error;
 use manifest::{DependencySource, Manifest};
 
-pub fn info(args: &[String]) -> Result<(), Error> {
+pub fn info(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!("usage: vex info");
         return Ok(());
@@ -11,16 +11,17 @@ pub fn info(args: &[String]) -> Result<(), Error> {
             "unexpected argument `{argument}`\nusage: vex info"
         )));
     }
-    run_info()
+    let project = selection.enter()?;
+    run_info(&project)
 }
 
-fn run_info() -> Result<(), Error> {
+fn run_info(project: &crate::project::Project) -> Result<(), Error> {
     let manifest = Manifest::load()?;
     println!("Vex project info");
     println!("name: {}", manifest.name);
     println!("version: {}", manifest.version);
     println!("type: {}", if manifest.lib { "library" } else { "binary" });
-    println!("manifest: {}", manifest.source_path.to_string_lossy());
+    println!("manifest: {}", project.manifest_path.display());
     if let Some(description) = manifest.description.as_ref() {
         println!("description: {description}");
     }

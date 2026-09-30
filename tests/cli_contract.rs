@@ -40,6 +40,7 @@ fn help_is_read_only_and_succeeds_without_a_manifest() {
         &["update", "--help"],
         &["info", "--help"],
         &["tree", "--help"],
+        &["metadata", "--help"],
         &["setup", "--help"],
         &["setup", "wavec", "--help"],
     ] {

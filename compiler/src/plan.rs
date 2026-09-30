@@ -28,8 +28,8 @@ pub(crate) fn validate_dry_run_json_output(stdout: &[u8], _stderr: &[u8]) -> Res
     }
     require_string_or_null(object, "control_mode")?;
     require_string_or_null(object, "forced_input_type")?;
-    require_link_or_null(object.get("link"))?;
-    require_execute_or_null(object.get("execute"))?;
+    require_link_or_null(object.get("link")).map_err(|e| format!("link: {e}"))?;
+    require_execute_or_null(object.get("execute")).map_err(|e| format!("execute: {e}"))?;
     for key in ["emit_kinds", "emit_jobs"] {
         string_array(&value[key], key)?;
     }
@@ -172,5 +172,59 @@ mod tests {
             .expect_err("stdout must contain exactly one plan");
         validate_dry_run_json_output(format!("{}{}", valid_plan(), valid_plan()).as_bytes(), b"")
             .expect_err("multiple plans are ambiguous");
+    }
+    #[test]
+    fn nested_contract_rejects_wrong_types_with_field_locations() {
+        let mut valid: Value = serde_json::from_str(valid_plan()).unwrap();
+        valid["execute"] = serde_json::json!({"program":"target/main","args":[]});
+        for (pointer, expected) in [
+            ("/inputs/0/path", "inputs[0].path"),
+            ("/inputs/0/kind", "inputs[0].kind"),
+            ("/compile/0/input", "compile[0].input"),
+            ("/compile/0/kind", "compile[0].kind"),
+            ("/compile/0/output", "compile[0].output"),
+            ("/compile/0/command", "compile[0].command"),
+            ("/link/output", "link"),
+            ("/link/program", "link"),
+            ("/link/inputs/0", "link.inputs[0]"),
+            ("/link/args/0", "link.args[0]"),
+            ("/execute/program", "execute"),
+            ("/execute/args", "execute"),
+            ("/emit_kinds/0", "emit_kinds[0]"),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = serde_json::json!(123);
+            let error = validate_dry_run_json_output(&serde_json::to_vec(&invalid).unwrap(), b"")
+                .unwrap_err();
+            assert!(error.contains(expected), "{pointer}: {error}");
+        }
+        for (key, value) in [
+            ("inputs", serde_json::json!([false])),
+            ("compile", serde_json::json!([[]])),
+            ("emit_jobs", serde_json::json!([null])),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = value;
+            let error = validate_dry_run_json_output(&serde_json::to_vec(&invalid).unwrap(), b"")
+                .unwrap_err();
+            assert!(error.contains(key), "{error}");
+        }
+    }
+
+    #[test]
+    fn contract_accepts_bom_whitespace_and_additive_fields_but_not_non_utf8() {
+        let mut valid: Value = serde_json::from_str(valid_plan()).unwrap();
+        valid["future_optional"] = serde_json::json!({"value":true});
+        valid["link"]["future_optional"] = serde_json::json!(true);
+        let text = format!("\u{feff} \n{valid}\n\t");
+        validate_dry_run_json_output(text.as_bytes(), b"warning on stderr").unwrap();
+        assert!(validate_dry_run_json_output(&[0xff], b"")
+            .unwrap_err()
+            .contains("UTF-8"));
+        assert!(
+            validate_dry_run_json_output(&vec![b' '; 8 * 1024 * 1024 + 1], b"")
+                .unwrap_err()
+                .contains("8 MiB")
+        );
     }
 }

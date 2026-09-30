@@ -901,6 +901,7 @@ fn authenticated_declarations_use_user_rewrites_without_storing_or_printing_cred
         &["fetch", "--locked", "--offline"],
         &["info"],
         &["tree"],
+        &["metadata", "--locked", "--offline"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_vex"))
             .args(args)

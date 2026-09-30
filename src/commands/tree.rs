@@ -17,12 +17,14 @@ struct TreeOptions {
     offline: bool,
 }
 
-pub fn tree(args: &[String]) -> Result<(), Error> {
+pub fn tree(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!("usage: vex tree [--locked] [--offline]");
         return Ok(());
     }
-    run_tree(parse_options(args).map_err(Error::usage)?)
+    let options = parse_options(args).map_err(Error::usage)?;
+    let _project = selection.enter()?;
+    run_tree(options)
 }
 
 fn run_tree(options: TreeOptions) -> Result<(), Error> {

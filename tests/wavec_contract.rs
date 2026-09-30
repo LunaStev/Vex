@@ -222,3 +222,213 @@ fn assert_success(output: &Output, action: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn simple_project(fixture: &TestDir) -> PathBuf {
+    let project = fixture.0.join("app");
+    fs::create_dir_all(project.join("src/nested")).unwrap();
+    fs::write(project.join("vex.ws"), "{ name = \"app\" }").unwrap();
+    fs::write(project.join("src/main.wave"), "fun main() {}\n").unwrap();
+    project
+}
+
+#[test]
+fn capability_preflight_rejects_targets_before_state_and_queries_once_per_invocation() {
+    let f = TestDir::new();
+    let project = simple_project(&f);
+    let fake = compile_fake_wavec(&f.0);
+    let log = f.0.join("capabilities.log");
+    for (targets, expected) in [
+        ("[\"aarch64-unknown-linux-gnu\"]", 3),
+        ("{}", 4),
+        ("[]", 4),
+        ("[1]", 4),
+        ("[\"\"]", 4),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .current_dir(&project)
+            .args(["build", "--target", "x86_64-unknown-linux-gnu"])
+            .env("VEX_WAVEC", &fake)
+            .env("FAKE_TARGETS", targets)
+            .env("FAKE_WAVEC_LOG", &log)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!project.join(".vex").exists());
+        assert!(!project.join("vex.lock").exists());
+        assert!(!project.join("target").exists());
+    }
+    fs::remove_file(&log).unwrap();
+    for command in ["build", "check"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .current_dir(&project)
+            .args([command, "--target=x86_64-unknown-linux-gnu"])
+            .env("VEX_WAVEC", &fake)
+            .env("FAKE_WAVEC_LOG", &log)
+            .output()
+            .unwrap();
+        assert_success(&out, command);
+    }
+    let logged = fs::read_to_string(log).unwrap();
+    assert_eq!(logged.lines().count(), 6);
+    assert_eq!(
+        logged
+            .lines()
+            .filter(|s| s.starts_with("print supported-targets"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn explicitly_empty_compiler_override_never_falls_back() {
+    let f = TestDir::new();
+    let project = simple_project(&f);
+    for value in ["", " \t\r\n"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .current_dir(&project)
+            .arg("build")
+            .env("VEX_WAVEC", value)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(5));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("VEX_WAVEC is explicitly empty"));
+        assert!(!project.join(".vex").exists());
+    }
+}
+
+#[test]
+fn runtime_arguments_and_cwd_survive_project_selection_and_dry_run_is_single_json() {
+    let f = TestDir::new();
+    let project = simple_project(&f);
+    let fake = compile_fake_wavec(&f.0);
+    // A relative override is anchored at invocation cwd, before ancestor discovery.
+    let nested = project.join("src/nested");
+    let local_compiler = nested.join(fake.file_name().unwrap());
+    fs::copy(fake, &local_compiler).unwrap();
+    let runtime = [
+        "",
+        "two words",
+        "한글",
+        "a\"b",
+        "slash\\value",
+        "--dry-run",
+        "--manifest-path",
+        "missing",
+        "--message-file",
+        "never.jsonl",
+        "--",
+    ];
+    let log = f.0.join("run.log");
+    let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&nested)
+        .args(["run", "--"])
+        .args(runtime)
+        .env("VEX_WAVEC", local_compiler.file_name().unwrap())
+        .env("FAKE_WAVEC_LOG", &log)
+        .output()
+        .unwrap();
+    assert_success(&out, "argument forwarding");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected: Vec<std::ffi::OsString> = runtime.iter().map(Into::into).collect();
+    assert!(
+        stdout.contains(&format!("FAKE_WAVEC_EXECUTED {expected:?}")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "PROGRAM_CWD:{:?}",
+            project.canonicalize().unwrap()
+        )),
+        "{stdout}"
+    );
+    assert!(!project.join("never.jsonl").exists());
+    assert!(!nested.join(".vex").exists());
+    let logged = fs::read_to_string(&log).unwrap();
+    assert!(!logged.contains("two words"));
+    fs::remove_file(&log).unwrap();
+    let before = fs::read(project.join("vex.lock")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&nested)
+        .args(["run", "--dry-run", "--locked", "--offline", "--"])
+        .args(runtime)
+        .env("VEX_WAVEC", &local_compiler)
+        .env("FAKE_WAVEC_LOG", &log)
+        .output()
+        .unwrap();
+    assert_success(&out, "dry run");
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["execute"]["args"], serde_json::json!(runtime));
+    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+    assert_eq!(before, fs::read(project.join("vex.lock")).unwrap());
+    assert!(!project.join("target/.vex-run/planned").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_compiler_path_and_runtime_bytes_are_preserved() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = TestDir::new();
+    let project = simple_project(&f);
+    let fake = compile_fake_wavec(&f.0);
+    let renamed =
+        f.0.join(std::ffi::OsString::from_vec(b"wavec-\xff".to_vec()));
+    fs::rename(fake, &renamed).unwrap();
+    let arg = std::ffi::OsString::from_vec(b"argument-\xfe".to_vec());
+    let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&project)
+        .args(["run", "--"])
+        .arg(&arg)
+        .env("VEX_WAVEC", &renamed)
+        .env("VEX_TEST_ARGUMENT_BYTES", "1")
+        .output()
+        .unwrap();
+    assert_success(&out, "OS arguments");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("ARG_BYTES:{:?}", b"argument-\xfe")),
+        "{:?}",
+        out
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&project)
+        .args(["run", "--dry-run", "--"])
+        .arg(arg)
+        .env("VEX_WAVEC", &renamed)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn compiler_selected_runner_keeps_runtime_arguments_and_exit_code() {
+    let f = TestDir::new();
+    let project = simple_project(&f);
+    let fake = compile_fake_wavec(&f.0);
+    let runner = f.0.join(if cfg!(windows) {
+        "runner.exe"
+    } else {
+        "runner"
+    });
+    fs::copy(&fake, &runner).unwrap();
+    let runtime = ["", "two words", "--dry-run", "quote\"slash\\"];
+    let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&project)
+        .args(["run", "--"])
+        .args(runtime)
+        .env("VEX_WAVEC", &fake)
+        .env("FAKE_RUNNER", &runner)
+        .env("VEX_TEST_RUN_EXIT", "37")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(37), "{out:?}");
+    let expected: Vec<std::ffi::OsString> = runtime.iter().map(Into::into).collect();
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(&format!("FAKE_WAVEC_EXECUTED {expected:?}")),
+        "{out:?}"
+    );
+}
