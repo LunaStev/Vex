@@ -189,7 +189,18 @@ fn dirty_managed_checkouts_are_rejected_without_discarding_changes() {
             &["check", "--locked", "--offline"][..],
             &["tree", "--locked", "--offline"][..],
         ] {
-            let output = vex(&app, args);
+            // Select a deterministic compiler path without relying on PATH or
+            // a managed install. Dirty-source preflight must reject the graph
+            // before this deliberately missing compiler can be invoked.
+            let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+                .args(args)
+                .current_dir(&app)
+                .env(
+                    "VEX_WAVEC",
+                    fixture.path().join("deliberately-missing-wavec"),
+                )
+                .output()
+                .expect("Vex dirty-checkout preflight must start");
             assert_failure(&output, &format!("reject dirty checkout for {args:?}"));
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(stderr.contains("managed Git dependency `dep`"), "{stderr}");
