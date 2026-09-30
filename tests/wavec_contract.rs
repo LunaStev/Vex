@@ -370,20 +370,17 @@ fn runtime_arguments_and_cwd_survive_project_selection_and_dry_run_is_single_jso
 
 #[cfg(unix)]
 #[test]
-fn non_utf8_compiler_path_and_runtime_bytes_are_preserved() {
+fn non_utf8_runtime_bytes_are_preserved() {
     use std::os::unix::ffi::OsStringExt;
     let f = TestDir::new();
     let project = simple_project(&f);
     let fake = compile_fake_wavec(&f.0);
-    let renamed =
-        f.0.join(std::ffi::OsString::from_vec(b"wavec-\xff".to_vec()));
-    fs::rename(fake, &renamed).unwrap();
     let arg = std::ffi::OsString::from_vec(b"argument-\xfe".to_vec());
     let out = Command::new(env!("CARGO_BIN_EXE_vex"))
         .current_dir(&project)
         .args(["run", "--"])
         .arg(&arg)
-        .env("VEX_WAVEC", &renamed)
+        .env("VEX_WAVEC", &fake)
         .env("VEX_TEST_ARGUMENT_BYTES", "1")
         .output()
         .unwrap();
@@ -397,7 +394,7 @@ fn non_utf8_compiler_path_and_runtime_bytes_are_preserved() {
         .current_dir(&project)
         .args(["run", "--dry-run", "--"])
         .arg(arg)
-        .env("VEX_WAVEC", &renamed)
+        .env("VEX_WAVEC", &fake)
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
@@ -431,4 +428,24 @@ fn compiler_selected_runner_keeps_runtime_arguments_and_exit_code() {
         String::from_utf8_lossy(&out.stdout).contains(&format!("FAKE_WAVEC_EXECUTED {expected:?}")),
         "{out:?}"
     );
+}
+
+// Linux permits these raw filename bytes; macOS CI filesystems reject them.
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_compiler_path_is_preserved() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = TestDir::new();
+    let project = simple_project(&f);
+    let fake = compile_fake_wavec(&f.0);
+    let renamed =
+        f.0.join(std::ffi::OsString::from_vec(b"wavec-\xff".to_vec()));
+    fs::rename(fake, &renamed).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .current_dir(&project)
+        .arg("check")
+        .env("VEX_WAVEC", &renamed)
+        .output()
+        .unwrap();
+    assert_success(&out, "non-UTF-8 compiler path");
 }

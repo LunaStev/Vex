@@ -210,7 +210,34 @@ fn discovery_uses_physical_ancestors_and_rejects_broken_nearest_manifest() {
     symlink("missing", app.join("src/nested/vex.ws")).unwrap();
     assert!(!vex(&app.join("src/nested"), &["info"]).status.success());
 }
-#[cfg(unix)]
+#[test]
+fn unicode_project_paths_are_preserved_in_selection_and_metadata() {
+    let f = Fixture::new();
+    let app = f.package("app", "", false);
+    let renamed = f.0.join("project 한글");
+    fs::rename(app, &renamed).unwrap();
+    let manifest = renamed.join("vex.ws");
+    for command in ["fetch", "metadata"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .current_dir(&f.0)
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg(command)
+            .output()
+            .unwrap();
+        success(&out);
+        if command == "metadata" {
+            let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(
+                value["root"]["manifest_path"],
+                manifest.canonicalize().unwrap().to_str().unwrap()
+            );
+        }
+    }
+}
+
+// These fixtures need raw-byte filenames; macOS CI rejects them with EILSEQ.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_manifest_path_is_preserved_but_metadata_json_rejects_it() {
     use std::os::unix::ffi::OsStringExt;
@@ -247,7 +274,8 @@ fn message_file_is_relative_to_invocation_directory_when_project_moves() {
     assert_eq!(end["exit_code"], 0);
 }
 
-#[cfg(unix)]
+// These fixtures need raw-byte filenames; macOS CI rejects them with EILSEQ.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_dependency_location_never_replaces_lockfile_with_lossy_paths() {
     use std::os::unix::{ffi::OsStringExt, fs::symlink};
