@@ -36,7 +36,10 @@ pub fn run_build_with_dry_run(
     let mut plan = plan::validate_dry_run_json_output(&validation_output.stdout, &validation_output.stderr)
         .map_err(|error| Error::compiler(format!("installed wavec is incompatible with Vex: {error}\nhelp: update wavec or set VEX_WAVEC=/path/to/wavec")))?;
     if !validation_output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&validation_output.stderr));
+        diagnostic::output::stderr(format_args!(
+            "{}",
+            String::from_utf8_lossy(&validation_output.stderr)
+        ))?;
     }
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let is_run = args[..separator].iter().any(|a| a == "--run");
@@ -100,7 +103,7 @@ pub fn run_build_with_dry_run(
                 .ok_or_else(|| Error::compiler("run plan is missing execute.args"))?;
             args.extend(values.into_iter().map(serde_json::Value::String));
         }
-        println!(
+        diagnostic::outln!(
             "{}",
             serde_json::to_string_pretty(&plan).map_err(Error::internal)?
         );

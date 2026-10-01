@@ -25,6 +25,10 @@ the dispatcher's explicit choice.
 - Every configured target must build and package successfully, and the complete
   archive set must be verified, before the tag or draft release is created.
   Partial releases are not supported.
+- Every package must execute its version/help smoke. Missing native/emulator
+  verification is an error. Never use the development-only `package
+  --allow-unverified` opt-in in release jobs. Retain the per-archive JSON output
+  with its digest and `verification: verified` as validation evidence.
 - Publishing the reviewed draft is a separate, intentional maintainer action.
 
 ## 1. Prepare the release commit
@@ -77,6 +81,11 @@ checklist before tagging:
    confirm a raw compiler option such as `vex build --emit=obj` is rejected.
    The integration suite must also cover path-lock relocation, Git lock
    reproducibility, full and targeted updates, and compiler schema rejection.
+   For Wave v0.2.1-pre-beta, wait for the official artifact, verify its archive
+   checksum and available provenance, and run the procedure in
+   [release readiness](docs/release-readiness.md#wave-021-compatibility-acceptance).
+   Packaging source or a local development compiler is not release-artifact
+   evidence. Record the archive and executable SHA-256 separately.
 7. Merge the release-candidate pull request and wait for every required CI
    check on `master` to pass.
 

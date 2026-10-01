@@ -33,7 +33,7 @@ pub fn build(
     messages: &mut Messages,
 ) -> Result<Outcome, Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
-        println!("{}", build_usage(mode));
+        diagnostic::outln!("{}", build_usage(mode));
         return Ok(Outcome::success());
     }
     let options = parse_vex_build_options(mode, args).map_err(Error::usage)?;

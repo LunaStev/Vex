@@ -122,7 +122,7 @@ fn dispatch(
         return Err(Error::internal("injected internal failure"));
     }
     if args.is_empty() {
-        print_help();
+        print_help()?;
         return Ok(Outcome::success());
     }
     if selection.manifest_path.is_some()
@@ -149,11 +149,11 @@ fn dispatch(
         }
         "setup" => setup(&args[1..]).map(|()| Outcome::success()),
         "--version" | "-V" | "version" if args.len() == 1 => {
-            print_version();
+            print_version()?;
             Ok(Outcome::success())
         }
         "--help" | "-h" | "help" if args.len() == 1 => {
-            print_help();
+            print_help()?;
             Ok(Outcome::success())
         }
         "--version" | "-V" | "version" | "--help" | "-h" | "help" => {
@@ -165,26 +165,34 @@ fn dispatch(
     }
 }
 
-fn print_version() {
-    println!("{} {}", "vex".color("2,161,47"), VERSION.color("2,161,47"));
+fn print_version() -> Result<(), diagnostic::Error> {
+    diagnostic::outln!("{} {}", "vex".color("2,161,47"), VERSION.color("2,161,47"));
+    Ok(())
 }
 
-fn print_help() {
-    println!("Vex - Wave package manager");
-    println!();
-    println!("Usage:");
-    println!("  vex [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]");
-    println!("  vex init [--lib]");
-    println!("  vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]");
-    println!(
+fn print_help() -> Result<(), diagnostic::Error> {
+    diagnostic::outln!("Vex - Wave package manager");
+    diagnostic::outln!();
+    diagnostic::outln!("Usage:");
+    diagnostic::outln!(
+        "  vex [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]"
+    );
+    diagnostic::outln!("  vex init [--lib]");
+    diagnostic::outln!(
+        "  vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]"
+    );
+    diagnostic::outln!(
         "  vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]"
     );
-    println!("  vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]");
-    println!("  vex fetch [--locked] [--offline]");
-    println!("  vex update [<package>...]");
-    println!("  vex info");
-    println!("  vex metadata [--format=json] [--locked] [--offline]");
-    println!("  vex tree [--locked] [--offline]");
-    println!("  vex setup wavec [--version <version>] [--script-fallback]");
-    println!("  vex --version");
+    diagnostic::outln!(
+        "  vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]"
+    );
+    diagnostic::outln!("  vex fetch [--locked] [--offline]");
+    diagnostic::outln!("  vex update [<package>...]");
+    diagnostic::outln!("  vex info");
+    diagnostic::outln!("  vex metadata [--format=json] [--locked] [--offline]");
+    diagnostic::outln!("  vex tree [--locked] [--offline]");
+    diagnostic::outln!("  vex setup wavec [--version <version>] [--script-fallback]");
+    diagnostic::outln!("  vex --version");
+    Ok(())
 }

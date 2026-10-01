@@ -19,7 +19,7 @@ struct TreeOptions {
 
 pub fn tree(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
-        println!("usage: vex tree [--locked] [--offline]");
+        diagnostic::outln!("usage: vex tree [--locked] [--offline]");
         return Ok(());
     }
     let options = parse_options(args).map_err(Error::usage)?;
@@ -44,7 +44,7 @@ fn run_tree(options: TreeOptions) -> Result<(), Error> {
         },
         ui::status,
     )?;
-    print!(
+    diagnostic::out!(
         "{}",
         render_tree(
             &manifest.name,

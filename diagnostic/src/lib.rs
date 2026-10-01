@@ -1,5 +1,6 @@
 //! Stable Vex error categories. Messages are explanatory, never classifiers.
 use std::fmt;
+pub mod output;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Category {
     Internal,

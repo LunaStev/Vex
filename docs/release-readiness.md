@@ -115,6 +115,37 @@ before release; a local cross-compile is not that evidence.
 
 ## Wave 0.2.1 compatibility acceptance
 
+Wave packaging was reviewed at `448370fe99e787645e7e61edccf7facf37fe8b4b`
+([package.py](https://github.com/wavefnd/Wave/blob/448370fe99e787645e7e61edccf7facf37fe8b4b/tools/ci/package.py),
+[release.py](https://github.com/wavefnd/Wave/blob/448370fe99e787645e7e61edccf7facf37fe8b4b/tools/ci/release.py)).
+Its archive names and single-root layout remain compatible with Vex's extractor.
+The additive `<archive>.metadata.json` has schema 1 and records compiler version,
+source SHA, std compatibility revision, target/ABI, payload paths, external
+prerequisites, archive name and SHA-256. Metadata target triples are compiler
+triples; archive names normalize Linux `unknown` and RISC-V `gc` components.
+Vex continues to require the published `SHA256SUMS` and verify available
+provenance. It does not yet use this additive sidecar to authorize installation
+or require it for older releases.
+
+The #154 fixtures cover all eight names, missing assets without GNU fallback,
+both MSVC ZIPs and the LoongArch64 TAR, checksum failures, compiler discovery,
+preserved std/runtime layout and preservation of the previous installation.
+Foreign fixture files are data, not executable compiler validation. Actual
+packaged std imports and native runtime prerequisites remain release acceptance.
+
+The #71 package report records verified/unverified execution per archive; release
+packaging rejects missing verifiers. The #91 pipe tests use already-closed OS
+pipes, including JSON output and message files, and run on every native CI host.
+
+For lockfile acceptance, `tests/lockfile_compatibility.rs` covers v1/v2/v3 and
+future/malformed formats with normal/locked/offline policies and LF/CRLF inputs.
+`tests/git_lock_reproducibility.rs` adds real SHA-256 v2/v3 reuse and migration with
+the source remote unavailable, plus selected update and subsequent offline reuse.
+Path relocation/diamond tests, transaction recovery tests, empty-lock tests and
+credential rendering tests remain part of the full workspace suite. An issue's
+completion requires its acceptance criteria and native CI evidence, not only
+these implementation references.
+
 The next planned compatible Wave release is `v0.2.1-pre-beta` on October 5, 2026.
 Until its official artifact exists, a local development-compiler smoke is development
 evidence only. It does not establish the artifact's compatibility or exact source
