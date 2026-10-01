@@ -349,7 +349,7 @@ class ReleaseToolTests(unittest.TestCase):
         windows = release_tool.SUPPORTED_TARGETS["x86_64-pc-windows-msvc"]
         self.assertEqual(release_tool.smoke_prefix(linux, binary, host), [str(binary)])
         with mock.patch.object(release_tool.shutil, "which", side_effect=lambda name: name), mock.patch.object(Path, "is_dir", return_value=True):
-            self.assertEqual(release_tool.smoke_prefix(riscv, binary, host), ["qemu-riscv64", "-L", "/usr/riscv64-linux-gnu", str(binary)])
+            self.assertEqual(release_tool.smoke_prefix(riscv, binary, host), ["qemu-riscv64", "-L", str(Path("/usr/riscv64-linux-gnu")), str(binary)])
             self.assertEqual(release_tool.smoke_prefix(windows, binary, host), ["wine", str(binary)])
             for target, verifier in [(riscv, "qemu-riscv64"), (windows, "wine")]:
                 with mock.patch.object(release_tool, "run_command", side_effect=[
