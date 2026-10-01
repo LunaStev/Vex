@@ -52,7 +52,7 @@ pub struct Resolution {
 }
 
 impl Resolution {
-    pub fn dependency_args(&self) -> Vec<String> {
+    pub fn dependency_args(&self) -> Result<Vec<String>, Error> {
         let mut args = vec!["--dep-root=.vex/deps".to_string()];
         for package in &self.packages {
             let path = match &package.source {
@@ -60,9 +60,15 @@ impl Resolution {
                     resolved
                 }
             };
-            args.push(format!("--dep={}={}", package.name, path.to_string_lossy()));
+            let path = path.to_str().ok_or_else(|| {
+                Error::resolution(format!(
+                    "wavec JSON protocol cannot represent non-UTF-8 source path for `{}`",
+                    package.name
+                ))
+            })?;
+            args.push(format!("--dep={}={path}", package.name));
         }
-        args
+        Ok(args)
     }
 
     pub fn package_count(&self) -> usize {
@@ -101,6 +107,41 @@ where
     }
 
     let guard = state::Guard::acquire(options.dry_run, &mut status).map_err(Error::environment)?;
+    resolve_guarded(manifest, options, status, guard)
+}
+
+/// Inspect only the existing local graph under a read-only shared lease.
+pub fn inspect(
+    manifest: &Manifest,
+    locked: bool,
+    status: impl FnMut(&str, String),
+) -> Result<Resolution, Error> {
+    let guard = state::Guard::acquire_existing(status).map_err(Error::resolution)?;
+    resolve_guarded(
+        manifest,
+        ResolveOptions {
+            dry_run: true,
+            offline: true,
+            locked,
+            update: UpdatePolicy::ReuseLocked,
+        },
+        |_, _| {},
+        guard,
+    )
+    .map_err(|e| {
+        Error::new(
+            e.category,
+            format!("{e}\nhelp: run `vex fetch` to prepare the local graph"),
+        )
+    })
+}
+
+fn resolve_guarded<F: FnMut(&str, String)>(
+    manifest: &Manifest,
+    options: ResolveOptions,
+    mut status: F,
+    guard: state::Guard,
+) -> Result<Resolution, Error> {
     recover_project(&guard, options.dry_run)?;
     let existing = read_lockfile()?;
     let missing_lockfile = existing.is_none();
@@ -192,6 +233,19 @@ where
         packages,
     }
     .normalized();
+
+    // WSON and the compiler's JSON interface cannot encode arbitrary OS bytes.
+    // Reject before publishing rather than serializing replacement characters.
+    for package in &resolved.packages {
+        let (LockedSource::Path { resolved, .. } | LockedSource::Git { resolved, .. }) =
+            &package.source;
+        if resolved.to_str().is_none() {
+            return Err(Error::resolution(format!(
+                "non-UTF-8 source path for `{}` cannot be represented in vex.lock",
+                package.name
+            )));
+        }
+    }
 
     let needs_lockfile = missing_lockfile || resolved != existing;
     if needs_lockfile {

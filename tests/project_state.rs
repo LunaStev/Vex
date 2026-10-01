@@ -524,3 +524,30 @@ fn program_signal_is_distinct_from_vex_cancellation() {
     assert_eq!(events.last().unwrap()["signal"], 15);
     assert_eq!(events.last().unwrap()["exit_code"], 143);
 }
+
+#[test]
+fn metadata_acquires_shared_lease_before_reading_lockfile() {
+    let f = Fixture::new();
+    let barrier = Barrier::new();
+    let mut holder = f
+        .command(&["build", "--locked", "--offline"])
+        .env("VEX_TEST_COMPILE", barrier.address())
+        .spawn()
+        .unwrap();
+    let mut compiler = barrier.reached();
+    // If metadata reads before acquiring its lease, this transient state fails.
+    fs::write(f.root.join("vex.lock"), "not a lockfile").unwrap();
+    let mut reader = f
+        .command(&["metadata", "--locked"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_lock(&mut reader);
+    fs::write(f.root.join("vex.lock"), "{version=2,package=[]}\n").unwrap();
+    compiler.write_all(&[1]).unwrap();
+    finish(&mut holder);
+    let result = reader.wait_with_output().unwrap();
+    assert!(result.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+}

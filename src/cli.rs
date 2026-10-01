@@ -29,25 +29,43 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
     };
     use diagnostic::Error;
     use serde_json::json;
-    let mut raw = std::env::args_os().skip(1).peekable();
-    let path = if raw.peek().is_some_and(|arg| arg == "--message-file") {
-        raw.next();
-        let path = raw
-            .next()
-            .filter(|p| !p.is_empty() && !p.to_string_lossy().starts_with('-'))
-            .ok_or_else(|| Error::usage("missing path for --message-file"))?;
-        Some(std::path::PathBuf::from(path))
-    } else {
-        None
-    };
-    let args = raw
-        .map(|a| {
-            a.into_string()
-                .map_err(|_| Error::usage("command arguments must be UTF-8"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if path.is_some() && args.first().is_some_and(|s| s == "--message-file") {
-        return Err(Error::usage("--message-file may only be specified once"));
+    let mut raw = std::env::args_os().skip(1);
+    let mut path = None;
+    let mut selection = crate::project::Selection::default();
+    let mut args = Vec::new();
+    let mut runtime = Vec::new();
+    while let Some(arg) = raw.next() {
+        if arg == "--" {
+            args.push("--".to_owned());
+            runtime.extend(raw);
+            break;
+        }
+        if arg == "--message-file" || arg == "--manifest-path" {
+            let slot = if arg == "--message-file" {
+                &mut path
+            } else {
+                &mut selection.manifest_path
+            };
+            if slot.is_some() {
+                return Err(Error::usage(format!(
+                    "{} may only be specified once",
+                    arg.to_string_lossy()
+                )));
+            }
+            let value = raw
+                .next()
+                .filter(|v| !v.is_empty() && !v.to_string_lossy().starts_with('-'))
+                .ok_or_else(|| {
+                    Error::usage(format!("missing path for {}", arg.to_string_lossy()))
+                })?;
+            *slot = Some(std::path::PathBuf::from(value));
+        } else {
+            args.push(arg.into_string().map_err(|_| {
+                Error::usage(
+                    "Vex options must be UTF-8; program arguments after -- may use OS strings",
+                )
+            })?);
+        }
     }
     let command = args.first().map(String::as_str).unwrap_or("help");
     let dry_run = matches!(command, "build" | "check" | "run")
@@ -62,7 +80,7 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
         .map_err(Error::environment)
         .and_then(|()| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                dispatch(&args, &mut messages)
+                dispatch(&args, &runtime, &selection, &mut messages)
             }))
             .unwrap_or_else(|_| Err(Error::internal("unexpected Vex internal failure")))
         });
@@ -93,6 +111,8 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
 
 fn dispatch(
     args: &[String],
+    runtime: &[std::ffi::OsString],
+    selection: &crate::project::Selection,
     messages: &mut crate::messages::Messages,
 ) -> Result<crate::outcome::Outcome, diagnostic::Error> {
     use crate::outcome::Outcome;
@@ -105,15 +125,28 @@ fn dispatch(
         print_help();
         return Ok(Outcome::success());
     }
+    if selection.manifest_path.is_some()
+        && !matches!(
+            args[0].as_str(),
+            "build" | "run" | "check" | "fetch" | "update" | "info" | "tree" | "metadata"
+        )
+    {
+        return Err(Error::usage(
+            "--manifest-path is only valid for project commands",
+        ));
+    }
     match args[0].as_str() {
         "init" => init(&args[1..]).map(|()| Outcome::success()),
-        "build" => build(BuildMode::Build, &args[1..], messages),
-        "run" => run_package(&args[1..], messages),
-        "check" => check(&args[1..], messages),
-        "fetch" => fetch(&args[1..]).map(|()| Outcome::success()),
-        "update" => update(&args[1..]).map(|()| Outcome::success()),
-        "info" => info(&args[1..]).map(|()| Outcome::success()),
-        "tree" => tree(&args[1..]).map(|()| Outcome::success()),
+        "build" => build(BuildMode::Build, &args[1..], runtime, selection, messages),
+        "run" => run_package(&args[1..], runtime, selection, messages),
+        "check" => check(&args[1..], runtime, selection, messages),
+        "fetch" => fetch(&args[1..], selection).map(|()| Outcome::success()),
+        "update" => update(&args[1..], selection).map(|()| Outcome::success()),
+        "info" => info(&args[1..], selection).map(|()| Outcome::success()),
+        "tree" => tree(&args[1..], selection).map(|()| Outcome::success()),
+        "metadata" => {
+            crate::commands::metadata::metadata(&args[1..], selection).map(|()| Outcome::success())
+        }
         "setup" => setup(&args[1..]).map(|()| Outcome::success()),
         "--version" | "-V" | "version" if args.len() == 1 => {
             print_version();
@@ -140,7 +173,7 @@ fn print_help() {
     println!("Vex - Wave package manager");
     println!();
     println!("Usage:");
-    println!("  vex [--message-file <new-path>] <command> [options]");
+    println!("  vex [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]");
     println!("  vex init [--lib]");
     println!("  vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]");
     println!(
@@ -150,6 +183,7 @@ fn print_help() {
     println!("  vex fetch [--locked] [--offline]");
     println!("  vex update [<package>...]");
     println!("  vex info");
+    println!("  vex metadata [--format=json] [--locked] [--offline]");
     println!("  vex tree [--locked] [--offline]");
     println!("  vex setup wavec [--version <version>] [--script-fallback]");
     println!("  vex --version");

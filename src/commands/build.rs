@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::ui;
-use compiler::{
-    collect_inputs, run_build_with_dry_run, validate_build_invocation, BuildValidationRequest,
-};
+use compiler::{run_build_with_dry_run, Compiler};
 use manifest::Manifest;
 use resolver::{resolve, ResolveOptions, UpdatePolicy};
 
@@ -25,27 +23,46 @@ struct VexBuildOptions {
     dry_run: bool,
     locked: bool,
     offline: bool,
-    run_args: Vec<String>,
-    run_separator_seen: bool,
 }
 
-pub fn build(mode: BuildMode, args: &[String], messages: &mut Messages) -> Result<Outcome, Error> {
+pub fn build(
+    mode: BuildMode,
+    args: &[String],
+    runtime: &[std::ffi::OsString],
+    selection: &crate::project::Selection,
+    messages: &mut Messages,
+) -> Result<Outcome, Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
         println!("{}", build_usage(mode));
         return Ok(Outcome::success());
     }
     let options = parse_vex_build_options(mode, args).map_err(Error::usage)?;
-    run_build(mode, options, messages)
+    let compiler = Compiler::select();
+    let _project = selection.enter()?;
+    let manifest = Manifest::load()?;
+    let mut compiler = compiler?;
+    run_build(mode, &manifest, options, runtime, &mut compiler, messages)
 }
 
 fn run_build(
     mode: BuildMode,
+    manifest: &Manifest,
     options: VexBuildOptions,
+    runtime: &[std::ffi::OsString],
+    compiler: &mut Compiler,
     messages: &mut Messages,
 ) -> Result<Outcome, Error> {
     let started = Instant::now();
-    let manifest = Manifest::load()?;
-    let default_input = resolve_default_input(&manifest, mode)?;
+    std::env::current_dir()
+        .map_err(Error::environment)?
+        .to_str()
+        .ok_or_else(|| {
+            Error::resolution("wavec JSON protocol cannot represent a non-UTF-8 project root")
+        })?;
+    if let Some(target) = &options.target {
+        compiler.validate_target(target)?;
+    }
+    let default_input = resolve_default_input(manifest, mode)?;
 
     let mut global_args = Vec::new();
     if options.release {
@@ -66,18 +83,8 @@ fn run_build(
         build_args.push("--dry-run".to_string());
     }
 
-    let inputs = collect_inputs(&build_args);
-    validate_build_invocation(BuildValidationRequest {
-        inputs: &inputs,
-        build_args: &build_args,
-        run_args: &options.run_args,
-        run_separator_seen: options.run_separator_seen,
-        global_args: &global_args,
-    })
-    .map_err(Error::resolution)?;
-
     let resolution = resolve(
-        &manifest,
+        manifest,
         ResolveOptions {
             dry_run: options.dry_run,
             update: UpdatePolicy::ReuseLocked,
@@ -99,15 +106,10 @@ fn run_build(
         None
     };
     let mut wavec_args = Vec::new();
-    wavec_args.extend(resolution.dependency_args());
+    wavec_args.extend(resolution.dependency_args()?);
     wavec_args.extend(global_args);
     wavec_args.push("build".to_string());
     wavec_args.extend(build_args);
-
-    if options.run_separator_seen {
-        wavec_args.push("--".to_string());
-        wavec_args.extend(options.run_args);
-    }
 
     let package = format!("{} v{}", manifest.name, manifest.version);
     if options.dry_run {
@@ -123,7 +125,13 @@ fn run_build(
     }
 
     messages.status("compiler")?;
-    let execution = run_build_with_dry_run(&wavec_args, options.dry_run, generation.as_deref())?;
+    let execution = run_build_with_dry_run(
+        compiler,
+        &wavec_args,
+        runtime,
+        options.dry_run,
+        generation.as_deref(),
+    )?;
     drop(resolution);
     let mut outcome = Outcome::success();
     if let Some(execution) = execution {
@@ -154,13 +162,11 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
         let token = args[i].as_str();
 
         if token == "--" {
-            options.run_separator_seen = true;
             if mode != BuildMode::Run {
                 return Err(
                     "runtime arguments after `--` are only valid with `vex run`".to_string()
                 );
             }
-            options.run_args.extend_from_slice(&args[i + 1..]);
             return Ok(options);
         }
 
@@ -246,23 +252,29 @@ fn resolve_default_input(manifest: &Manifest, mode: BuildMode) -> Result<String,
 
     let preferred = manifest.default_entry_path();
     if preferred.exists() {
-        return Ok(preferred.to_string_lossy().to_string());
+        return input_string(&preferred);
     }
 
     if mode == BuildMode::Run {
         if let Some(path) = find_wave_file_with_main(Path::new("src"))? {
-            return Ok(path.to_string_lossy().to_string());
+            return input_string(&path);
         }
     }
 
     if let Some(path) = find_first_wave_file(Path::new("src"))? {
-        return Ok(path.to_string_lossy().to_string());
+        return input_string(&path);
     }
 
     Err(Error::resolution(format!(
         "no default Wave input found. Expected `{}` or any `.wave` file in `src/`.",
         preferred.to_string_lossy()
     )))
+}
+
+fn input_string(path: &Path) -> Result<String, Error> {
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        Error::resolution("wavec JSON protocol cannot represent a non-UTF-8 input path")
+    })
 }
 
 fn find_first_wave_file(src_dir: &Path) -> Result<Option<PathBuf>, Error> {
@@ -336,7 +348,6 @@ mod tests {
                 "--locked",
                 "--offline",
                 "--",
-                "arg",
             ]),
         )
         .expect("options must parse");
@@ -345,7 +356,6 @@ mod tests {
         assert!(options.release);
         assert!(options.locked);
         assert!(options.offline);
-        assert_eq!(options.run_args, strings(&["arg"]));
     }
 
     #[test]

@@ -142,7 +142,17 @@ fn interrupted_publication_is_recovered_by_the_next_command_but_not_dry_run() {
             .join("backup/pkg_8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"),
     )
     .unwrap();
-    let dry = vex(&app, &["check", "--dry-run", "--locked"]);
+    // Recovery preflight must fail before invoking any compiler, independently
+    // of whether the host has wavec on PATH or in a managed installation.
+    let dry = Command::new(env!("CARGO_BIN_EXE_vex"))
+        .args(["check", "--dry-run", "--locked"])
+        .current_dir(&app)
+        .env(
+            "VEX_WAVEC",
+            fixture.path().join("deliberately-missing-wavec"),
+        )
+        .output()
+        .expect("Vex recovery preflight must start");
     assert_failure(&dry, "dry-run cannot recover");
     assert!(String::from_utf8_lossy(&dry.stderr).contains("recovery is pending"));
     assert!(!live.exists());
