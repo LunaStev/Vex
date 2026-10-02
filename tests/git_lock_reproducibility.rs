@@ -875,6 +875,27 @@ fn sha256_repositories_are_locked_and_reused_offline() {
     assert_success(&vex(&app, &["fetch"]), "SHA-256 fetch");
     let initial = read_lock(&app);
     assert!(initial.contains(&commit));
+    // Removing the source proves offline reuse cannot be accidentally supplied
+    // by a local-file fetch. Also exercise the historical v2 encoding of a real
+    // SHA-256 pin before migrating it, without changing the pinned identity.
+    let hidden = fixture.path().join("unavailable-sha256-source");
+    fs::rename(&dep, &hidden).unwrap();
+    let v2 = initial.replacen("version = 3,", "version = 2,", 1);
+    assert_ne!(v2, initial);
+    for historical in [&v2, &initial] {
+        fs::write(app.join("vex.lock"), historical).unwrap();
+        assert_success(
+            &vex(&app, &["fetch", "--locked", "--offline"]),
+            "historical SHA-256 offline reuse",
+        );
+        assert_eq!(read_lock(&app), *historical);
+        assert_success(
+            &vex(&app, &["fetch", "--offline"]),
+            "historical SHA-256 migration",
+        );
+        assert_eq!(read_lock(&app), initial);
+    }
+    fs::rename(&hidden, &dep).unwrap();
     assert_success(
         &vex(&app, &["fetch", "--offline", "--locked"]),
         "SHA-256 offline",
@@ -883,7 +904,16 @@ fn sha256_repositories_are_locked_and_reused_offline() {
     fs::write(dep.join("changed"), "revision").unwrap();
     let updated = commit_all(&dep, "update SHA-256");
     assert_success(&vex(&app, &["update", "dep"]), "SHA-256 targeted update");
-    assert!(read_lock(&app).contains(&updated));
+    let updated_lock = read_lock(&app);
+    assert_eq!(updated.len(), 64);
+    assert!(updated_lock.contains(&updated));
+    assert!(!updated_lock.contains(&commit));
+    fs::rename(&dep, &hidden).unwrap();
+    assert_success(
+        &vex(&app, &["fetch", "--locked", "--offline"]),
+        "updated SHA-256 pin without remote",
+    );
+    assert_eq!(read_lock(&app), updated_lock);
 }
 
 #[test]

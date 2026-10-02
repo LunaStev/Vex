@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import gzip
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -63,6 +64,12 @@ class Target:
     @property
     def executable_name(self) -> str:
         return f"{BINARY_NAME}.exe" if self.platform == "Windows" else BINARY_NAME
+
+
+@dataclass(frozen=True)
+class Verification:
+    status: str
+    verifier: str | None
 
 
 SUPPORTED_TARGETS = {
@@ -388,15 +395,24 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE.sub("", text)
 
 
-def smoke_binary(binary_data: bytes, target: Target, version: str, host: str) -> bool:
+def smoke_binary(
+    binary_data: bytes, target: Target, version: str, host: str,
+    *, allow_unverified: bool = False,
+) -> Verification:
     with tempfile.TemporaryDirectory(prefix="vex-package-smoke-") as temporary:
         binary = Path(temporary) / target.executable_name
         binary.write_bytes(binary_data)
         binary.chmod(0o755)
         prefix = smoke_prefix(target, binary, host)
         if prefix is None:
-            status("Skipping", f"execution smoke for {target.triple} on {host}")
-            return False
+            if not allow_unverified:
+                raise ReleaseError(
+                    f"no execution verifier for {target.triple} on {host}\n"
+                    "help: package on a native host or install the required emulator; "
+                    "development packages only may use --allow-unverified"
+                )
+            status("Unverified", f"execution smoke for {target.triple} on {host}")
+            return Verification("unverified", None)
 
         version_result = run_command([*prefix, "--version"], capture=True)
         version_output = strip_ansi(version_result.stdout).strip()
@@ -409,10 +425,14 @@ def smoke_binary(binary_data: bytes, target: Target, version: str, host: str) ->
         help_result = run_command([*prefix, "--help"], capture=True)
         if "Vex - Wave package manager" not in strip_ansi(help_result.stdout):
             raise ReleaseError("packaged binary help output did not contain the Vex heading")
-        return True
+        verifier = "native" if target.triple == host else Path(prefix[0]).name
+        return Verification("verified", verifier)
 
 
-def verify_archive(archive: Path, stage: Path, target: Target, version: str, host: str) -> None:
+def verify_archive(
+    archive: Path, stage: Path, target: Target, version: str, host: str,
+    *, allow_unverified: bool = False,
+) -> Verification:
     binary_member = f"{stage.name}/{target.executable_name}"
     try:
         if target.archive == "zip":
@@ -432,7 +452,7 @@ def verify_archive(archive: Path, stage: Path, target: Target, version: str, hos
         if extra:
             details.append(f"unexpected: {', '.join(extra)}")
         raise ReleaseError(f"archive contents are invalid ({'; '.join(details)})")
-    smoke_binary(binary_data, target, version, host)
+    return smoke_binary(binary_data, target, version, host, allow_unverified=allow_unverified)
 
 
 def sha256(path: Path) -> str:
@@ -485,21 +505,36 @@ def collect_release_archives(
     return expected
 
 
-def package_targets(targets: Iterable[Target], version: str, host: str) -> list[Path]:
+def package_targets(
+    targets: Iterable[Target], version: str, host: str, *, allow_unverified: bool = False,
+) -> list[Path]:
     epoch = source_date_epoch()
     archives: list[Path] = []
     for target in targets:
         status("Packaging", target.triple)
         stage = prepare_stage(version, target)
+        verification = None
+
+        def verify(candidate: Path) -> None:
+            nonlocal verification
+            verification = verify_archive(
+                candidate, stage, target, version, host, allow_unverified=allow_unverified,
+            )
+
         try:
             archive = create_archive(
-                stage, target, epoch,
-                verify=lambda candidate: verify_archive(candidate, stage, target, version, host),
+                stage, target, epoch, verify=verify,
             )
         finally:
             shutil.rmtree(stage, ignore_errors=True)
         archives.append(archive)
         status("Packaged", str(archive.relative_to(ROOT)))
+        assert verification is not None
+        print(json.dumps({
+            "schema_version": 1, "archive": archive.name, "sha256": sha256(archive),
+            "target": target.triple, "version": version,
+            "verification": verification.status, "verifier": verification.verifier,
+        }, sort_keys=True))
     checksum_path = write_checksums(archives)
     status("Checksums", str(checksum_path.relative_to(ROOT)))
     return archives
@@ -570,7 +605,7 @@ def command_build(args: argparse.Namespace) -> None:
 
 def command_package(args: argparse.Namespace) -> None:
     targets = select_targets(args.targets)
-    package_targets(targets, load_version(), detect_host_target())
+    package_targets(targets, load_version(), detect_host_target(), allow_unverified=args.allow_unverified)
 
 
 def command_checksum(args: argparse.Namespace) -> None:
@@ -653,6 +688,10 @@ def create_parser(version: str) -> argparse.ArgumentParser:
 
     package = commands.add_parser("package", help="package existing release binaries")
     add_target_arguments(package)
+    package.add_argument(
+        "--allow-unverified", action="store_true",
+        help="development only: permit packaging when no execution verifier is available",
+    )
     package.set_defaults(handler=command_package)
 
     checksum = commands.add_parser(

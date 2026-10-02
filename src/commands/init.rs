@@ -10,7 +10,7 @@ pub fn init(args: &[String]) -> Result<(), Error> {
     let is_lib = match parse_options(args).map_err(Error::usage)? {
         Some(value) => value,
         None => {
-            println!("usage: vex init [--lib]");
+            diagnostic::outln!("usage: vex init [--lib]");
             return Ok(());
         }
     };
@@ -61,8 +61,8 @@ fn run_init(is_lib: bool) -> Result<(), Error> {
     ));
     state::initialize(&guard, &files).map_err(Error::environment)?;
 
-    println!("initialized Wave project");
-    println!("created {MANIFEST_FILE}, vex.lock, and src/{source_file}");
+    diagnostic::outln!("initialized Wave project");
+    diagnostic::outln!("created {MANIFEST_FILE}, vex.lock, and src/{source_file}");
     Ok(())
 }
 

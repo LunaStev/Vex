@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import importlib.util
 import os
 import re
@@ -18,6 +20,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
+from contextlib import redirect_stdout
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -331,12 +334,73 @@ class ReleaseToolTests(unittest.TestCase):
                 ]
             ) as run:
                 if valid:
-                    self.assertTrue(release_tool.smoke_binary(b"unused", target, expected, target.triple))
+                    self.assertEqual(release_tool.smoke_binary(b"unused", target, expected, target.triple), release_tool.Verification("verified", "native"))
                     self.assertEqual(run.call_count, 2)
                 else:
                     with self.assertRaisesRegex(release_tool.ReleaseError, "unexpected version"):
                         release_tool.smoke_binary(b"unused", target, expected, target.triple)
                     self.assertEqual(run.call_count, 1)
+
+    def test_execution_verifiers_and_missing_emulators(self) -> None:
+        host = "x86_64-unknown-linux-gnu"
+        binary = Path("fixture")
+        linux = release_tool.SUPPORTED_TARGETS[host]
+        riscv = release_tool.SUPPORTED_TARGETS["riscv64gc-unknown-linux-gnu"]
+        windows = release_tool.SUPPORTED_TARGETS["x86_64-pc-windows-msvc"]
+        self.assertEqual(release_tool.smoke_prefix(linux, binary, host), [str(binary)])
+        with mock.patch.object(release_tool.shutil, "which", side_effect=lambda name: name), mock.patch.object(Path, "is_dir", return_value=True):
+            self.assertEqual(release_tool.smoke_prefix(riscv, binary, host), ["qemu-riscv64", "-L", str(Path("/usr/riscv64-linux-gnu")), str(binary)])
+            self.assertEqual(release_tool.smoke_prefix(windows, binary, host), ["wine", str(binary)])
+            for target, verifier in [(riscv, "qemu-riscv64"), (windows, "wine")]:
+                with mock.patch.object(release_tool, "run_command", side_effect=[
+                    subprocess.CompletedProcess([], 0, "vex 0.0.1"),
+                    subprocess.CompletedProcess([], 0, "Vex - Wave package manager"),
+                ]):
+                    self.assertEqual(release_tool.smoke_binary(b"fixture", target, "0.0.1", host), release_tool.Verification("verified", verifier))
+        with mock.patch.object(release_tool.shutil, "which", return_value=None):
+            for target in [riscv, windows]:
+                with self.assertRaisesRegex(release_tool.ReleaseError, "no execution verifier"):
+                    release_tool.smoke_binary(b"fixture", target, "0.0.1", host)
+                self.assertEqual(release_tool.smoke_binary(b"fixture", target, "0.0.1", host, allow_unverified=True), release_tool.Verification("unverified", None))
+        # Opt-in allows absence only, never a failing verifier or wrong binary.
+        with mock.patch.object(release_tool, "run_command", return_value=subprocess.CompletedProcess([], 0, "vex 9.9.9")):
+            with self.assertRaisesRegex(release_tool.ReleaseError, "unexpected version"):
+                release_tool.smoke_binary(b"fixture", linux, "0.0.1", host, allow_unverified=True)
+
+    def test_missing_verifier_preserves_archive_and_development_report_is_explicit(self) -> None:
+        target = release_tool.SUPPORTED_TARGETS["aarch64-apple-darwin"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_package_inputs(root, target, b"fake binary")
+            dist = root / "dist"
+            dist.mkdir()
+            archive = release_tool.archive_path("0.0.1", target, dist)
+            archive.write_bytes(b"previous archive")
+            (dist / "SHA256SUMS").write_text("previous checksum\n")
+            prepare = release_tool.prepare_stage
+            checksums = release_tool.write_checksums
+            with mock.patch.object(release_tool, "ROOT", root), mock.patch.object(release_tool, "source_date_epoch", return_value=1_700_000_000), mock.patch.object(release_tool, "prepare_stage", side_effect=lambda version, target: prepare(version, target, root=root)), mock.patch.object(release_tool, "write_checksums", side_effect=lambda archives: checksums(archives, dist)):
+                with self.assertRaisesRegex(release_tool.ReleaseError, "no execution verifier"):
+                    release_tool.package_targets([target], "0.0.1", "x86_64-unknown-linux-gnu")
+                self.assertEqual(archive.read_bytes(), b"previous archive")
+                self.assertEqual((dist / "SHA256SUMS").read_text(), "previous checksum\n")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    release_tool.package_targets([target], "0.0.1", "x86_64-unknown-linux-gnu", allow_unverified=True)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["verification"], "unverified")
+                self.assertIsNone(report["verifier"])
+                self.assertEqual(report["sha256"], hashlib.sha256(archive.read_bytes()).hexdigest())
+                self.assertEqual(report["archive"], archive.name)
+
+    def test_official_release_does_not_accept_unverified_opt_in(self) -> None:
+        parser = release_tool.create_parser("0.0.1")
+        self.assertTrue(parser.parse_args(["package", "--allow-unverified"]).allow_unverified)
+        with self.assertRaises(SystemExit) as result:
+            parser.parse_args(["release", "--allow-unverified"])
+        self.assertEqual(result.exception.code, 2)
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("--allow-unverified", workflow)
 
     def test_archive_replacement_preserves_previous_on_any_failure(self) -> None:
         for triple in ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]:

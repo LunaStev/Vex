@@ -1,8 +1,7 @@
 # CLI outcome and message contract (#90)
 
-Status: approved and implemented on the production-hardening branch. Native
-platform CI remains part of PR acceptance. This event interface is separate from
-the planned project metadata interface (#26).
+Status: approved and merged in #149. Project metadata was merged separately in
+#153. Each subsequent change still requires its own native platform CI evidence.
 
 ## Exit outcomes
 
@@ -23,6 +22,13 @@ resolution error: machine-readable outcomes identify their origin as `program`.
 Cancellation observed by Vex takes precedence over a racing ordinary child
 completion; ordinary program signal termination is still a program outcome.
 The runtime has no implicit timeout.
+
+Vex-owned stdout uses fallible writes on Unix and Windows. A broken pipe stops
+further stdout output and keeps the command outcome; other stdout failures are
+environment errors (5). Diagnostic writes are best effort if stderr is closed,
+and cannot replace the original failure or program exit. Compiler-plan stderr
+forwarding failures stop before compilation with an environment error. Inherited
+compiler/program stdio is unchanged. A message file remains a separate channel.
 
 Classification follows the error's origin, not a search of its text or only
 the command phase. For example, an invalid manifest is resolution, a missing

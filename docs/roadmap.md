@@ -1,27 +1,32 @@
 # Current stabilization sequence
 
-The base for this work is master `0f29f5e` (merged #145). Its eight required CI jobs
-passed, including Windows. The old #99 text describing a red post-#113 master is
-historical and is not the current baseline. Issue checkboxes are acceptance
-tracking, not proof that an implementation is absent or complete.
+Project discovery (#25), compiler capabilities (#27), and read-only JSON metadata
+(#26) were merged in #153 at master `d6a0bd0`. State coordination and production
+hardening were merged earlier in #145 and #149. Open issue status alone does not
+mean that the corresponding implementation is absent.
 
-1. Review the production-hardening branch as one coordinated PR: initialization,
-   checkout encoding/reuse, lock portability, process supervision, credential
-   handling, artifact installation, dependency auditing and release provenance.
-   See [the implementation/acceptance notes](production-hardening.md).
-2. Run native CI and review outstanding acceptance for #75/#79 and the earlier
-   #145 work. Preserve the PR requirement, eight checks, latest-base requirement,
-   and prohibition on force/delete/bypass.
-3. When a compatible official Wave release exists, pin/validate that artifact and
-   activate required real-compiler CI (#66/#131). Do not substitute a pinned source
-   build or infer compatibility from version/schema alone.
-4. Continue feature work in order: project discovery (#25), compiler capabilities
-   (#27), then JSON metadata (#26). The separate #90 diagnostic JSONL and exit-code
-   contract is implemented in this branch; native PR CI remains acceptance work.
-5. Package targets/artifacts/profiles (#46/#47/#48), user workspaces (#30), package
-   version policy (#132), and other product-design work remain separate decisions.
+1. Finish Wave release consumption (#154/#96): select all eight Wave host
+   artifacts, preserve the existing checksum/provenance and transactional
+   installation boundaries, and test ZIP/TAR payload preservation. Review Wave's
+   additive metadata schema without assuming a new requirement for older releases.
+2. Make missing package execution verification explicit (#71), and handle closed
+   CLI output pipes without panic (#91). These changes require the existing eight
+   PR checks, including native Windows and macOS runs.
+3. Review lockfile compatibility (#79/#138) and the implemented #110/#124/#146/
+   #147/#148 acceptance against regression tests. Do not reimplement completed
+   work or close broad issues solely because a related PR merged.
+4. Keep release support documentation and this roadmap current (#75/#99).
+5. When the official compatible Wave v0.2.1-pre-beta artifact exists, verify its
+   checksum/provenance, run package-import and public-reexport smoke tests, then
+   pin the verified artifact in required compiler CI (#66/#131). No source-build
+   gate substitutes for the agreed official-release acceptance.
 
-Explicit cleanup/GC, submodule policy, runtime OS baseline and repository-wide
-normalization are separate follow-ups. Git/path sources remain the active model;
-central registry/publish remain out of scope. This document does not publish any
-issue edits or close issues automatically.
+The package/CLI changes above form one reviewable PR. The compiler CI activation
+remains conditional on the official Wave artifact; a local development compiler
+or mock release is not a substitute. See [release readiness](release-readiness.md)
+for the compatibility window and remaining release evidence.
+
+Vex host distribution expansion (#72/#73), minimum runtime baselines (#85),
+explicit cleanup/GC (#88), submodules (#95), and package targets/artifacts/profiles
+(#46/#47/#48) remain separate. User workspaces (#30), package version policy
+(#132), registry and publish are outside this stabilization bundle.

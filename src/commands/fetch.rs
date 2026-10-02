@@ -22,7 +22,7 @@ pub(super) fn dependency_command(
     selection: &crate::project::Selection,
 ) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
-        println!(
+        diagnostic::outln!(
             "usage: vex {}",
             if update {
                 "update [<package>...]"

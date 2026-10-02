@@ -31,6 +31,10 @@ pub(crate) fn home() -> Result<PathBuf, String> {
 
 pub fn managed_wavec() -> Option<PathBuf> {
     let root = home().ok()?;
+    managed_wavec_in(&root)
+}
+
+fn managed_wavec_in(root: &Path) -> Option<PathBuf> {
     let value = fs::read_to_string(root.join("current")).ok()?;
     let path = relative(value.trim()).ok()?;
     let binary = root.join(path);
@@ -45,15 +49,19 @@ pub(super) fn version(value: &str) -> Result<String, String> {
     Ok(parsed.to_string())
 }
 
-fn target() -> Result<&'static str, String> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+fn target(os: &str, arch: &str) -> Result<&'static str, String> {
+    match (os, arch) {
         ("linux", "x86_64") => Ok("x86_64-linux-gnu"),
         ("linux", "aarch64") => Ok("aarch64-linux-gnu"),
         ("linux", "riscv64") => Ok("riscv64-linux-gnu"),
+        ("linux", "loongarch64") => Ok("loongarch64-linux-gnu"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        ("windows", "x86_64") => Ok("x86_64-pc-windows-gnu"),
-        _ => Err(error("no supported compiler artifact for this host")),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+        ("windows", "aarch64") => Ok("aarch64-pc-windows-msvc"),
+        _ => Err(error(format!(
+            "no supported compiler artifact for host {os}/{arch}"
+        ))),
     }
 }
 
@@ -109,6 +117,7 @@ fn download(url: &str, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct ReleasePlan {
     tag: String,
     version: String,
@@ -165,13 +174,13 @@ fn select_release(
 }
 
 pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
+    let target = target(std::env::consts::OS, std::env::consts::ARCH)?;
     let requested = requested.map(version).transpose()?;
     let endpoint = requested
         .as_ref()
         .map(|v| format!("{REPOSITORY}/tags/v{v}"))
         .unwrap_or_else(|| format!("{REPOSITORY}/latest"));
     let release: Value = serde_json::from_slice(&get(&endpoint)?).map_err(error)?;
-    let target = target()?;
     let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
     let ReleasePlan {
         tag,
@@ -214,15 +223,9 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
         verify_checksum(&archive, &expected)?;
         verify_provenance(&archive, &expected, &tag)?;
         let payload = stage.join("payload");
-        fs::create_dir(&payload).map_err(error)?;
-        extract(&archive, &payload, extension == "zip")?;
-        let candidates = binaries(&payload)?;
-        if candidates.len() != 1 {
-            return Err(error("archive must contain exactly one wavec executable"));
-        }
-        let binary = &candidates[0];
+        let binary = unpack_compiler(&archive, &payload, extension == "zip")?;
         let output = process::output(
-            Command::new(binary).arg("--version"),
+            Command::new(&binary).arg("--version"),
             Duration::from_secs(30),
         )
         .map_err(error)?;
@@ -255,7 +258,8 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
         (Err(e), _) => Err(e),
         (Ok(binary), Ok(())) => Ok(binary),
         (Ok(binary), Err(e)) => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr().lock(),
                 "warning: installed {}; temporary cleanup failed at {}: {e}",
                 binary.display(),
                 stage.display()
@@ -263,6 +267,18 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
             Ok(binary)
         }
     }
+}
+
+fn unpack_compiler(archive: &Path, payload: &Path, zip: bool) -> Result<PathBuf, String> {
+    fs::create_dir(payload).map_err(error)?;
+    extract(archive, payload, zip)?;
+    let mut candidates = binaries(payload, if zip { "wavec.exe" } else { "wavec" })?;
+    if candidates.len() != 1 {
+        return Err(error(
+            "archive must contain exactly one wavec executable for the selected host",
+        ));
+    }
+    Ok(candidates.remove(0))
 }
 
 fn publish_candidate(
@@ -322,7 +338,8 @@ fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), Stri
         .rsplit_once('\n')
         .ok_or_else(|| error("invalid provenance response"))?;
     if status == "404" {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr().lock(),
             "note: official Wave archive has no published GitHub provenance; SHA-256 verified"
         );
         return Ok(());
@@ -335,7 +352,8 @@ fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), Stri
         .as_array()
         .ok_or_else(|| error("invalid provenance response"))?;
     if attestations.is_empty() {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr().lock(),
             "note: official Wave archive has no published GitHub provenance; SHA-256 verified"
         );
         return Ok(());
@@ -529,13 +547,13 @@ fn extract(archive: &Path, root: &Path, zip: bool) -> Result<(), String> {
     }
     Ok(())
 }
-fn binaries(root: &Path) -> Result<Vec<PathBuf>, String> {
+fn binaries(root: &Path, executable: &str) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     for entry in fs::read_dir(root).map_err(error)? {
         let entry = entry.map_err(error)?;
         if entry.file_type().map_err(error)?.is_dir() {
-            found.extend(binaries(&entry.path())?);
-        } else if entry.file_name() == if cfg!(windows) { "wavec.exe" } else { "wavec" } {
+            found.extend(binaries(&entry.path(), executable)?);
+        } else if entry.file_name() == executable {
             found.push(entry.path());
         }
     }
@@ -571,6 +589,169 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn official_host_mapping_and_asset_names() {
+        for (os, arch, expected, extension) in [
+            ("linux", "x86_64", "x86_64-linux-gnu", "tar.gz"),
+            ("linux", "aarch64", "aarch64-linux-gnu", "tar.gz"),
+            ("linux", "riscv64", "riscv64-linux-gnu", "tar.gz"),
+            ("linux", "loongarch64", "loongarch64-linux-gnu", "tar.gz"),
+            ("macos", "x86_64", "x86_64-apple-darwin", "tar.gz"),
+            ("macos", "aarch64", "aarch64-apple-darwin", "tar.gz"),
+            ("windows", "x86_64", "x86_64-pc-windows-msvc", "zip"),
+            ("windows", "aarch64", "aarch64-pc-windows-msvc", "zip"),
+        ] {
+            assert_eq!(target(os, arch).unwrap(), expected);
+            let name = format!("wave-v0.2.1-pre-beta-{expected}.{extension}");
+            let plan = select_release(
+                &fake_release(&name),
+                Some("0.2.1-pre-beta"),
+                expected,
+                extension,
+            )
+            .unwrap();
+            assert_eq!(plan.name, name);
+            assert_eq!(
+                plan.archive_url,
+                format!("{DOWNLOAD}v0.2.1-pre-beta/{name}")
+            );
+            let missing = fake_release(&name.replace(expected, "x86_64-pc-windows-gnu"));
+            assert!(select_release(&missing, None, expected, extension)
+                .unwrap_err()
+                .contains(&name));
+        }
+        for (os, arch) in [
+            ("freebsd", "x86_64"),
+            ("windows", "x86"),
+            ("linux", "arm"),
+            ("linux", "wasm64"),
+        ] {
+            let message = target(os, arch).unwrap_err();
+            assert!(message.contains(&format!("{os}/{arch}")));
+        }
+    }
+
+    fn fake_release(name: &str) -> Value {
+        serde_json::json!({"draft":false,"tag_name":"v0.2.1-pre-beta","assets":[
+            {"name":name,"browser_download_url":format!("{DOWNLOAD}v0.2.1-pre-beta/{name}")},
+            {"name":"SHA256SUMS","browser_download_url":format!("{DOWNLOAD}v0.2.1-pre-beta/SHA256SUMS")}
+        ]})
+    }
+
+    fn fake_archive(archive: &Path, root: &str, zip: bool, compatible: bool) {
+        // Wave tools/ci/package.py schema 1 keeps one archive root, packaged
+        // std and target-specific native resources. These are data fixtures,
+        // not native execution evidence for foreign compilers.
+        let executable = if !compatible {
+            "other"
+        } else if zip {
+            "wavec.exe"
+        } else {
+            "wavec"
+        };
+        let runtime = if zip {
+            "llvm/lib/clang/21/lib/windows/builtins.lib"
+        } else {
+            "crt/crt1.o"
+        };
+        let files = [
+            executable,
+            "std/manifest.json",
+            "std/mem/layout.wave",
+            "llvm/bin/lld",
+            runtime,
+        ];
+        if zip {
+            let mut writer = zip::ZipWriter::new(File::create(archive).unwrap());
+            for file in files {
+                writer
+                    .start_file(
+                        format!("{root}/{file}"),
+                        zip::write::SimpleFileOptions::default(),
+                    )
+                    .unwrap();
+                writer.write_all(b"fixture").unwrap();
+            }
+            writer.finish().unwrap();
+        } else {
+            let gzip = flate2::write::GzEncoder::new(
+                File::create(archive).unwrap(),
+                flate2::Compression::default(),
+            );
+            let mut writer = tar::Builder::new(gzip);
+            for file in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(7);
+                header.set_mode(0o755);
+                header.set_cksum();
+                writer
+                    .append_data(&mut header, format!("{root}/{file}"), &b"fixture"[..])
+                    .unwrap();
+            }
+            writer.into_inner().unwrap().finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn new_host_archives_preserve_layout_and_previous_installation_on_failure() {
+        for (os, arch) in [
+            ("windows", "x86_64"),
+            ("windows", "aarch64"),
+            ("linux", "loongarch64"),
+        ] {
+            for failure in ["checksum", "payload", "missing", "none"] {
+                let fixture = Fixture::new();
+                let root = &fixture.0;
+                fs::create_dir(root.join("old")).unwrap();
+                fs::write(root.join("old/wavec"), "old compiler").unwrap();
+                fs::write(root.join("current"), "old/wavec").unwrap();
+                let stage = create_stage(root).unwrap();
+                let target = target(os, arch).unwrap();
+                let zip = os == "windows";
+                let extension = if zip { "zip" } else { "tar.gz" };
+                let package = format!("wave-v0.2.1-pre-beta-{target}");
+                let name = format!("{package}.{extension}");
+                let archive = stage.join("archive");
+                fake_archive(&archive, &package, zip, failure != "payload");
+                let digest = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+                let result = (|| -> Result<PathBuf, String> {
+                    let release = fake_release(if failure == "missing" {
+                        "wrong-asset"
+                    } else {
+                        &name
+                    });
+                    select_release(&release, None, target, extension)?;
+                    let expected = checksum(&format!("{digest}  {name}\n"), &name)?;
+                    if failure == "checksum" {
+                        fs::write(&archive, b"tampered").unwrap();
+                    }
+                    verify_checksum(&archive, &expected)?;
+                    let payload = stage.join("payload");
+                    let binary = unpack_compiler(&archive, &payload, zip)?;
+                    assert!(payload.join(&package).join("std/manifest.json").is_file());
+                    assert!(payload.join(&package).join("llvm/bin/lld").is_file());
+                    let relative = binary.strip_prefix(&payload).unwrap();
+                    publish_candidate(root, &stage, &payload, "new", relative, || Ok(()))
+                })();
+                if failure == "none" {
+                    let installed = result.unwrap();
+                    assert_eq!(managed_wavec_in(root), Some(installed.clone()));
+                    assert!(installed
+                        .parent()
+                        .unwrap()
+                        .join("std/mem/layout.wave")
+                        .is_file());
+                } else {
+                    assert!(result.is_err(), "{target}: {failure}");
+                    assert_eq!(fs::read(root.join("current")).unwrap(), b"old/wavec");
+                    assert_eq!(managed_wavec_in(root), Some(root.join("old/wavec")));
+                    assert!(!root.join("new").exists());
+                }
+                assert_eq!(fs::read(root.join("old/wavec")).unwrap(), b"old compiler");
+            }
         }
     }
 

@@ -3,7 +3,7 @@ use manifest::{DependencySource, Manifest};
 
 pub fn info(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
-        println!("usage: vex info");
+        diagnostic::outln!("usage: vex info");
         return Ok(());
     }
     if let Some(argument) = args.first() {
@@ -17,27 +17,27 @@ pub fn info(args: &[String], selection: &crate::project::Selection) -> Result<()
 
 fn run_info(project: &crate::project::Project) -> Result<(), Error> {
     let manifest = Manifest::load()?;
-    println!("Vex project info");
-    println!("name: {}", manifest.name);
-    println!("version: {}", manifest.version);
-    println!("type: {}", if manifest.lib { "library" } else { "binary" });
-    println!("manifest: {}", project.manifest_path.display());
+    diagnostic::outln!("Vex project info");
+    diagnostic::outln!("name: {}", manifest.name);
+    diagnostic::outln!("version: {}", manifest.version);
+    diagnostic::outln!("type: {}", if manifest.lib { "library" } else { "binary" });
+    diagnostic::outln!("manifest: {}", project.manifest_path.display());
     if let Some(description) = manifest.description.as_ref() {
-        println!("description: {description}");
+        diagnostic::outln!("description: {description}");
     }
     if let Some(author) = manifest.author.as_ref() {
-        println!("author: {author}");
+        diagnostic::outln!("author: {author}");
     }
     if let Some(license) = manifest.license.as_ref() {
-        println!("license: {license}");
+        diagnostic::outln!("license: {license}");
     }
-    println!("dependencies: {}", manifest.dependencies.len());
+    diagnostic::outln!("dependencies: {}", manifest.dependencies.len());
 
     for dep in manifest.dependencies {
         match dep.source {
             DependencySource::Path { path } => match dep.version {
-                Some(version) => println!("  {} {} path {}", dep.name, version, path),
-                None => println!("  {} path {}", dep.name, path),
+                Some(version) => diagnostic::outln!("  {} {} path {}", dep.name, version, path),
+                None => diagnostic::outln!("  {} path {}", dep.name, path),
             },
             DependencySource::Git {
                 url,
@@ -52,7 +52,7 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
                     .unwrap_or_default();
                 match dep.version {
                     Some(version) => {
-                        println!(
+                        diagnostic::outln!(
                             "  {} {} git {}{}",
                             dep.name,
                             version,
@@ -60,7 +60,12 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
                             reference
                         )
                     }
-                    None => println!("  {} git {}{}", dep.name, source::identity(&url), reference),
+                    None => diagnostic::outln!(
+                        "  {} git {}{}",
+                        dep.name,
+                        source::identity(&url),
+                        reference
+                    ),
                 }
             }
         }

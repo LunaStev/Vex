@@ -102,7 +102,7 @@ fn path_diamond_reordering_preserves_a_locked_graph() {
     for (name, child) in [
         ("leaf", ""),
         ("left", "../leaf"),
-        ("right", "../left/../leaf"),
+        ("nested/right", "../../left/../leaf"),
     ] {
         let root = fixture.0.join(name);
         fs::create_dir_all(root.join("src")).unwrap();
@@ -114,14 +114,24 @@ fn path_diamond_reordering_preserves_a_locked_graph() {
         };
         fs::write(
             root.join("vex.ws"),
-            format!("{{name={name:?},lib=true,dependencies={dependencies}}}"),
+            format!(
+                "{{name={:?},lib=true,dependencies={dependencies}}}",
+                root.file_name().unwrap().to_str().unwrap()
+            ),
         )
         .unwrap();
     }
     let app = fixture.0.join("app");
     fs::create_dir(&app).unwrap();
     let manifest = |first: &str, second: &str| {
-        format!("{{name=\"app\",dependencies=[{{name={first:?},path=\"../{first}\"}},{{name={second:?},path=\"../{second}\"}}]}}")
+        let path = |name: &str| {
+            if name == "right" {
+                "../nested/right".to_owned()
+            } else {
+                format!("../{name}")
+            }
+        };
+        format!("{{name=\"app\",dependencies=[{{name={first:?},path={:?}}},{{name={second:?},path={:?}}}]}}", path(first), path(second))
     };
     fs::write(app.join("vex.ws"), manifest("left", "right")).unwrap();
     assert_success(&vex(&app, &["fetch"]), "resolve diamond");
@@ -130,6 +140,18 @@ fn path_diamond_reordering_preserves_a_locked_graph() {
     assert_success(
         &vex(&app, &["fetch", "--locked", "--offline"]),
         "reordered diamond",
+    );
+    assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
+    assert_success(
+        &vex(&app, &["fetch", "--offline"]),
+        "ordinary reordered diamond",
+    );
+    assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
+    // Fresh resolutions must be canonical as well as preserve an existing lock.
+    fs::remove_file(app.join("vex.lock")).unwrap();
+    assert_success(
+        &vex(&app, &["fetch", "--offline"]),
+        "fresh reversed diamond",
     );
     assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
 }

@@ -469,6 +469,10 @@ fn updating_parent_replaces_and_then_removes_its_transitive_source() {
     let replacement = fixture.path().join("replacement");
     let middle = fixture.path().join("middle");
     let app = fixture.path().join("app");
+    let unrelated = fixture.path().join("unrelated");
+    create_package(&unrelated, "unrelated", &[]);
+    init_git(&unrelated);
+    commit_all(&unrelated, "unrelated initial");
     for (path, message) in [
         (&original, "original source"),
         (&replacement, "replacement source"),
@@ -480,8 +484,27 @@ fn updating_parent_replaces_and_then_removes_its_transitive_source() {
     create_package(&middle, "middle", &[("leaf", git_url(&original), None)]);
     init_git(&middle);
     commit_all(&middle, "original graph");
-    create_package(&app, "app", &[("middle", git_url(&middle), None)]);
+    create_package(
+        &app,
+        "app",
+        &[
+            ("middle", git_url(&middle), None),
+            ("unrelated", git_url(&unrelated), None),
+        ],
+    );
     assert_success(&vex(&app, &["fetch"]), "initial transitive graph");
+    let unrelated_checkout = checkout(&app, "unrelated");
+    let unrelated_head = git_stdout(&unrelated_checkout, &["rev-parse", "HEAD"]);
+    let unrelated_refs = git_stdout(
+        &unrelated_checkout,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/remotes",
+        ],
+    );
+    fs::write(unrelated.join("new"), "not selected").unwrap();
+    commit_all(&unrelated, "unrelated remote advances");
     let old = git_stdout(&checkout(&app, "leaf"), &["rev-parse", "HEAD"]);
     create_package(&middle, "middle", &[("leaf", git_url(&replacement), None)]);
     commit_all(&middle, "replace transitive source");
@@ -494,6 +517,14 @@ fn updating_parent_replaces_and_then_removes_its_transitive_source() {
     assert_eq!(
         git_stdout(&leaf, &["config", "--get", "remote.origin.url"]),
         git_url(&replacement)
+    );
+    let replacement_graph = lockfile::decode(&read_lock(&app)).unwrap();
+    assert_eq!(
+        replacement_graph.package("middle").unwrap().dependencies,
+        ["leaf"]
+    );
+    assert!(
+        matches!(&replacement_graph.package("leaf").unwrap().source, lockfile::LockedSource::Git {commit, ..} if commit == &git_stdout(&replacement, &["rev-parse", "HEAD"]))
     );
     assert_success(
         &vex(&app, &["fetch", "--locked", "--offline"]),
@@ -512,5 +543,23 @@ fn updating_parent_replaces_and_then_removes_its_transitive_source() {
     assert_success(
         &vex(&app, &["fetch", "--locked", "--offline"]),
         "reuse reduced graph offline",
+    );
+    assert_eq!(
+        git_stdout(&unrelated_checkout, &["rev-parse", "HEAD"]),
+        unrelated_head
+    );
+    assert_eq!(
+        git_stdout(
+            &unrelated_checkout,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/remotes"
+            ]
+        ),
+        unrelated_refs
+    );
+    assert!(
+        matches!(&graph.package("unrelated").unwrap().source, lockfile::LockedSource::Git {commit, ..} if commit == &unrelated_head)
     );
 }

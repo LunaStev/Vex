@@ -6,7 +6,7 @@ use std::path::Path;
 
 pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
-        println!("usage: vex metadata [--format=json] [--locked] [--offline]");
+        diagnostic::outln!("usage: vex metadata [--format=json] [--locked] [--offline]");
         return Ok(());
     }
     let mut locked = false;
@@ -69,7 +69,7 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
             "root":root_text,"manifest_path":json_path(&project.manifest_path)?,
             "entry_path":json_path(&root.join(manifest.default_entry_path()))?,"dependencies":root_dependencies},
         "target_directory":json_path(&root.join("target"))?, "packages":packages});
-    println!(
+    diagnostic::outln!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(Error::internal)?
     );

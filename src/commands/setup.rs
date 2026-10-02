@@ -5,7 +5,7 @@ pub fn setup(args: &[String]) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help")
         || matches!(args, [wavec, help] if wavec == "wavec" && (help == "-h" || help == "--help"))
     {
-        println!("{USAGE}");
+        diagnostic::outln!("{USAGE}");
         return Ok(());
     }
     if args.first().map(String::as_str) != Some("wavec") {
@@ -43,9 +43,9 @@ pub fn setup(args: &[String]) -> Result<(), Error> {
             }
         }
     }
-    println!("installing wavec {}", toolchain::requested_version(version));
+    diagnostic::outln!("installing wavec {}", toolchain::requested_version(version));
     match toolchain::install_wavec(version) {
-        Ok(binary) => println!("wavec installed at {}", binary.display()),
+        Ok(binary) => diagnostic::outln!("wavec installed at {}", binary.display()),
         Err(error) if script_fallback && !process::cancelled() => {
             crate::ui::error(format!("artifact installation failed: {error}\nusing explicitly requested official script fallback"));
             toolchain::install_wavec_script(version).map_err(Error::environment)?;

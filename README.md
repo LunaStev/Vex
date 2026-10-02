@@ -73,12 +73,14 @@ install -m 0755 target/release/vex ~/.local/bin/vex
 ```
 
 Install `wavec` separately and make it available on `PATH`, or set
-`VEX_WAVEC` to its full path. `vex setup wavec --version 0.2.0-pre-beta`
+`VEX_WAVEC` to its full path. `vex setup wavec --version <compatible-release>`
 downloads the official host archive, verifies SHA256SUMS and available GitHub
 provenance, extracts a new versioned directory, checks the executable version and
 atomically switches a current-installation pointer. Previous installations remain
 available. Downloads require `curl` (`curl.exe` on Windows), and `gh` when
 published provenance must be verified. Missing host artifacts fail explicitly.
+The planned compatible release is `0.2.1-pre-beta`; verify its official artifact
+after publication. The older `0.2.0-pre-beta` is not a package-import substitute.
 
 `VEX_TOOLCHAIN_HOME` selects the installation prefix (default:
 `$HOME/.vex/toolchains`, or `%LOCALAPPDATA%/.vex/toolchains` on Windows).
@@ -86,6 +88,12 @@ Compiler selection prefers `VEX_WAVEC`, then `PATH`, then the managed installati
 `--script-fallback` explicitly permits downloading and running the official
 `wave-lang.dev` installer if artifact installation fails; it is never automatic.
 This fallback follows the external script's installation policy.
+
+Current source selects Wave's Windows x64/ARM64 **MSVC** ZIPs and Linux
+amd64/arm64/RISC-V/LoongArch64 and macOS Intel/Apple Silicon tarballs. It never
+falls back to a Windows GNU archive. This compiler asset selection does not add
+Vex release binaries for Windows ARM64 or LoongArch64. Windows SDK, MSVC/UCRT
+libraries and the Visual C++ runtime remain external prerequisites.
 
 Installing an artifact does not prove package-language compatibility. Official
 Wave `0.2.0-pre-beta` supports Hello World but not the canonical package imports
@@ -293,6 +301,11 @@ internal errors, 2 for CLI usage, 3 for project/dependency resolution, 4 for
 compiler failures, 5 for environment, 124 for timeout, and 130 for cancellation.
 `vex run` preserves program exit codes; Unix signal exits translate to `128 + signal`.
 
+If a stdout pipe consumer exits early, Vex stops writing to that pipe without a
+panic or changing the command's result. Other stdout errors return environment
+code 5. Closed stderr cannot replace the original command/program outcome;
+use a separate message file when diagnostics must survive a closed terminal pipe.
+
 Use `vex --message-file build.jsonl build` to record schema-1 JSON Lines without
 mixing JSON into compiler or program stdio. Each completed report ends with a
 `finished` event containing `origin` (`vex` or `program`), `category`, `exit_code`,
@@ -451,6 +464,17 @@ only when the working tree is clean and `HEAD` has the exact `v<version>` tag.
 Cross-target builds still require the corresponding Rust target and native
 linker to be installed. `VEX_RELEASE_HOST` exists for release infrastructure
 that must override host-target detection; normal development should not set it.
+
+Packaging requires successful version/help execution, natively or through the
+configured QEMU/Wine verifier. A missing verifier fails before replacing an
+existing archive. `x.py package --allow-unverified` permits an unverified
+development archive only when no verifier is available; it cannot suppress a
+failed smoke test and is not accepted by `x.py release`.
+
+Each packaged archive produces one JSON line on stdout with `schema_version: 1`,
+`archive`, `sha256`, `target`, `version`, `verification` (`verified` or
+`unverified`) and `verifier` (`native`, emulator name, or null). Progress remains
+on stderr. These are packaging reports, separate from Vex command message files.
 
 `python3 x.py verify-release` checks that the source tree is clean and `HEAD`
 has the annotated `v<version>` tag for local release reproduction. For an
