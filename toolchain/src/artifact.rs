@@ -265,19 +265,7 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
         verify_provenance(&archive, &expected, &tag)?;
         let payload = stage.join("payload");
         let binary = unpack_compiler(&archive, &payload, extension == "zip")?;
-        let output = process::output(
-            Command::new(&binary).arg("--version"),
-            Duration::from_secs(30),
-        )
-        .map_err(error)?;
-        let output_text = String::from_utf8(output.stdout).map_err(error)?;
-        if !output.status.success()
-            || !matches!(output_text.split_whitespace().take(2).collect::<Vec<_>>().as_slice(), ["wavec", actual] if actual.strip_prefix('v').unwrap_or(actual) == version)
-        {
-            return Err(error(
-                "downloaded compiler version does not match the release",
-            ));
-        }
+        verify_binary_version(&binary, &version)?;
         let relative_binary = binary.strip_prefix(&payload).map_err(error)?.to_owned();
         // The checksum makes reinstalling a changed release a distinct generation.
         let generation = format!(
@@ -308,6 +296,29 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
             Ok(binary)
         }
     }
+}
+
+fn verify_binary_version(binary: &Path, version: &str) -> Result<(), String> {
+    let output = process::output(
+        Command::new(binary).arg("--version").env("NO_COLOR", "1"),
+        Duration::from_secs(30),
+    )
+    .map_err(error)?;
+    if !output.status.success() {
+        return Err(error(format!(
+            "downloaded compiler could not report its version ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let output_text = String::from_utf8(output.stdout).map_err(error)?;
+    if !matches!(output_text.split_whitespace().take(2).collect::<Vec<_>>().as_slice(), ["wavec", actual] if actual.strip_prefix('v').unwrap_or(actual) == version)
+    {
+        return Err(error(format!(
+            "downloaded compiler version does not match the release (expected {version}, received {output_text:?})"
+        )));
+    }
+    Ok(())
 }
 
 fn unpack_compiler(archive: &Path, payload: &Path, zip: bool) -> Result<PathBuf, String> {
@@ -656,6 +667,52 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn version_probe_disables_color_and_distinguishes_execution_failure() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("compiler.rs");
+        fs::write(
+            &source,
+            r#"
+            fn main() {
+                if std::env::current_exe().unwrap().file_stem().unwrap() == "broken" {
+                    eprintln!("missing compiler runtime");
+                    std::process::exit(7);
+                }
+                if std::env::var_os("NO_COLOR").is_some() {
+                    println!("wavec 0.2.1-pre-beta (platform)\n  backend: LLVM 21");
+                } else {
+                    println!("\x1b[32mwavec\x1b[0m \x1b[32m0.2.1-pre-beta\x1b[0m");
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let binary = fixture
+            .0
+            .join(if cfg!(windows) { "wavec.exe" } else { "wavec" });
+        assert!(Command::new("rustc")
+            .arg(source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap()
+            .success());
+        verify_binary_version(&binary, "0.2.1-pre-beta").unwrap();
+        let mismatch = verify_binary_version(&binary, "0.2.0-pre-beta").unwrap_err();
+        assert!(mismatch.contains("does not match") && mismatch.contains("0.2.1-pre-beta"));
+        let broken = fixture.0.join(if cfg!(windows) {
+            "broken.exe"
+        } else {
+            "broken"
+        });
+        fs::copy(binary, &broken).unwrap();
+        let failure = verify_binary_version(&broken, "0.2.1-pre-beta").unwrap_err();
+        assert!(failure.contains("could not report its version"));
+        assert!(failure.contains("missing compiler runtime"));
+        assert!(!failure.contains("does not match"));
     }
 
     #[test]

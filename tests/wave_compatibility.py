@@ -43,10 +43,12 @@ def main():
     env["PATH"] = str(args.wavec_bin.resolve()) + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory(prefix="vex-wave-compat-") as temporary:
         root = Path(temporary)
-        version = run(["wavec", "--version"], root, env)
+        # Python's Windows executable search does not use a replacement env PATH.
+        # Probe this exact compiler; Vex itself still selects it through PATH.
+        version = run([str(compiler), "--version"], root, dict(env, NO_COLOR="1"))
         if args.expected_version and version.stdout.split()[:2] != ["wavec", args.expected_version]:
             raise RuntimeError("compiler version does not match the selected release")
-        capabilities = run(["wavec", "print", "supported-targets", "--format=json"], root, env)
+        capabilities = run([str(compiler), "print", "supported-targets", "--format=json"], root, env)
         targets = json.loads(capabilities.stdout)
         if not isinstance(targets, list) or not targets or not all(isinstance(t, str) and t for t in targets):
             raise RuntimeError("invalid supported-targets response")

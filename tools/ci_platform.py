@@ -46,7 +46,8 @@ def main():
         with urllib.request.urlopen(request, timeout=60) as response:
             release = json.load(response)
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f'official public Wave v{WAVE_VERSION} is unavailable (HTTP {error.code}); platform acceptance cannot finish until its public release exists') from error
+        detail = error.read(4096).decode('utf-8', errors='replace')
+        raise RuntimeError(f'cannot query official Wave v{WAVE_VERSION} (HTTP {error.code}): {detail}') from error
     if release.get('draft') is not False or release.get('tag_name') != f'v{WAVE_VERSION}':
         raise RuntimeError('required official Wave release is not public')
     asset_name = f"wave-v{WAVE_VERSION}-{target['wave_target']}.{target['archive']}"

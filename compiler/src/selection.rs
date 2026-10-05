@@ -76,7 +76,9 @@ impl Compiler {
     pub fn version(&mut self) -> Result<&str, Error> {
         if self.version.is_none() {
             let output = process::output(
-                Command::new(&self.path).arg("--version"),
+                Command::new(&self.path)
+                    .arg("--version")
+                    .env("NO_COLOR", "1"),
                 Duration::from_secs(60),
             )
             .map_err(Error::environment)?;

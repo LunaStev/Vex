@@ -20,7 +20,11 @@ fn main() {
     }
     let args = env::args_os().skip(1).collect::<Vec<_>>();
     if args.first().is_some_and(|a| a == "--version") {
-        println!("wavec 0.2.1-pre-beta");
+        if env::var_os("NO_COLOR").is_some() {
+            println!("wavec 0.2.1-pre-beta");
+        } else {
+            println!("\x1b[32mwavec\x1b[0m \x1b[32m0.2.1-pre-beta\x1b[0m");
+        }
         return;
     }
     if env::current_exe().unwrap().file_stem().unwrap() == "runner" {

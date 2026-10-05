@@ -38,6 +38,7 @@ impl Fixture {
         cmd.args(args)
             .current_dir(&self.root)
             .env("VEX_WAVEC", &self.compiler)
+            .env_remove("NO_COLOR")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         cmd
