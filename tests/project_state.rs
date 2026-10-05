@@ -64,6 +64,9 @@ impl Barrier {
         loop {
             match self.0.accept() {
                 Ok((mut socket, _)) => {
+                    // BSD/macOS can inherit the listener's nonblocking mode.
+                    // The handshake uses a bounded blocking read on every OS.
+                    socket.set_nonblocking(false).unwrap();
                     socket
                         .set_read_timeout(Some(Duration::from_secs(15)))
                         .unwrap();

@@ -1363,7 +1363,12 @@ fn failed_clone_keeps_old_graph_and_never_publishes_partial_checkout() {
         let dep = fixture.path().join("dep");
         let next = fixture.path().join("next");
         let app = if long_path {
-            fixture.path().join("nested".repeat(20)).join("app")
+            // Exercise the >200 init/fetch route without exceeding Windows'
+            // deliberate 240 UTF-16-unit checkout directory limit.
+            let padding = 100usize
+                .saturating_sub(fixture.path().as_os_str().len() + 5)
+                .max(1);
+            fixture.path().join("n".repeat(padding)).join("app")
         } else {
             fixture.path().join("app")
         };
