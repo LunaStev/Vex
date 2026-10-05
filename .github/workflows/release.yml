@@ -178,6 +178,8 @@ jobs:
           python-version: '3.11'
       - name: Complete native acceptance
         if: matrix.executor == 'native'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python tools/ci_platform.py ${{ matrix.id }}
       - name: Register target execution
         if: matrix.executor == 'qemu'

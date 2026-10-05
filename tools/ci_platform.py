@@ -26,6 +26,10 @@ def run(*args, env=None, capture=False):
 
 
 def main():
+    # Native CI may authenticate API queries. Never inherit that credential in
+    # builds, tests, compilers or user programs, or forward it into a guest.
+    api_token = os.environ.pop('GH_TOKEN', None)
+    os.environ.pop('GITHUB_TOKEN', None)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('platform', choices=[p['id'] for p in PLATFORMS])
     args = parser.parse_args()
@@ -39,9 +43,12 @@ def main():
     run(sys.executable, 'x.py', 'build', target['rust_target'])
     run(sys.executable, 'x.py', 'package', target['rust_target'])
     binary = ROOT / 'target' / target['rust_target'] / 'release' / ('vex.exe' if target['os'] == 'windows' else 'vex')
-    # No token, nightly fallback, draft access, or build-from-master substitution.
+    # Authentication changes API rate limits, never public-release acceptance.
     url = f'https://api.github.com/repos/wavefnd/Wave/releases/tags/v{WAVE_VERSION}'
-    request = urllib.request.Request(url, headers={'User-Agent': 'Vex-release-acceptance'})
+    headers = {'User-Agent': 'Vex-release-acceptance'}
+    if api_token:
+        headers['Authorization'] = 'Bearer ' + api_token
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             release = json.load(response)
@@ -57,7 +64,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='vex-compiler-acceptance-') as temporary:
         env = dict(os.environ, VEX_TOOLCHAIN_HOME=temporary, VEX_WAVEC_ARCHIVE_SHA256=WAVE_PIN['archives'][target['id']])
         env.pop('VEX_WAVEC', None)
-        run(binary, 'setup', 'wavec', '--version', WAVE_VERSION, env=env)
+        setup_env = dict(env, GH_TOKEN=api_token) if api_token else env
+        run(binary, 'setup', 'wavec', '--version', WAVE_VERSION, env=setup_env)
         compiler = Path(temporary) / (Path(temporary) / 'current').read_text().strip()
         compiler_hash = hashlib.sha256(compiler.read_bytes()).hexdigest()
         run(sys.executable, 'tests/wave_compatibility.py', '--vex', binary,

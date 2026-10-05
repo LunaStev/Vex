@@ -70,6 +70,7 @@ fn target(os: &str, arch: &str) -> Result<&'static str, String> {
 
 fn curl(url: &str) -> Command {
     let mut command = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
     command.args([
         "--disable",
         "--fail",
@@ -91,6 +92,14 @@ fn curl(url: &str) -> Command {
     command
 }
 fn get(url: &str) -> Result<Vec<u8>, String> {
+    if url.starts_with("https://api.github.com/repos/wavefnd/Wave/") {
+        let (status, body) = api(url)?;
+        return if status == 200 {
+            Ok(body)
+        } else {
+            Err(error(format!("GitHub API query failed with HTTP {status}")))
+        };
+    }
     let output = process::output(&mut curl(url), Duration::from_secs(310)).map_err(error)?;
     if !output.status.success() {
         return Err(error(format!(
@@ -300,7 +309,11 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
 
 fn verify_binary_version(binary: &Path, version: &str) -> Result<(), String> {
     let output = process::output(
-        Command::new(binary).arg("--version").env("NO_COLOR", "1"),
+        Command::new(binary)
+            .arg("--version")
+            .env("NO_COLOR", "1")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN"),
         Duration::from_secs(30),
     )
     .map_err(error)?;
@@ -361,12 +374,25 @@ fn publish_candidate(
     Ok(root.join(current))
 }
 
-fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), String> {
-    let endpoint =
-        format!("https://api.github.com/repos/wavefnd/Wave/attestations/sha256:{digest}");
-    // An explicit 404 is absence; authentication, rate-limit and transport
-    // failures must not be silently treated as an un-attested release.
+fn api(endpoint: &str) -> Result<(u16, Vec<u8>), String> {
+    let path = endpoint
+        .strip_prefix("https://api.github.com/repos/wavefnd/Wave/")
+        .ok_or_else(|| error("unexpected compiler API endpoint"))?;
+    if std::env::var_os("GH_TOKEN").is_some() {
+        // Authentication is scoped to GitHub API calls, never archive downloads
+        // or the downloaded compiler. gh keeps credentials out of argv/logs.
+        let output = process::output(
+            Command::new("gh")
+                .args(["api", "--hostname", "github.com", "--include"])
+                .arg(format!("repos/wavefnd/Wave/{path}"))
+                .env_remove("GH_DEBUG"),
+            Duration::from_secs(70),
+        )
+        .map_err(error)?;
+        return parse_api_response(&output.stdout);
+    }
     let mut command = Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+    command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
     command.args([
         "--disable",
         "--silent",
@@ -379,27 +405,65 @@ fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), Stri
         "60",
         "--write-out",
         "\n%{http_code}",
-        &endpoint,
+        endpoint,
     ]);
     let result = process::output(&mut command, Duration::from_secs(70)).map_err(error)?;
     if !result.status.success() {
-        return Err(error("could not query release provenance"));
+        return Err(error("could not query compiler GitHub API"));
     }
     let response = String::from_utf8(result.stdout).map_err(error)?;
     let (body, status) = response
         .rsplit_once('\n')
-        .ok_or_else(|| error("invalid provenance response"))?;
-    if status == "404" {
+        .ok_or_else(|| error("invalid GitHub API response"))?;
+    Ok((status.parse().map_err(error)?, body.as_bytes().to_vec()))
+}
+
+fn parse_api_response(output: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    let response = String::from_utf8(output.to_vec())
+        .map_err(error)?
+        .replace("\r\n", "\n");
+    let (headers, body) = response
+        .split_once("\n\n")
+        .ok_or_else(|| error("invalid GitHub API response headers"))?;
+    let mut status_line = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    if !status_line
+        .next()
+        .is_some_and(|value| value.starts_with("HTTP/"))
+    {
+        return Err(error("missing GitHub API HTTP status"));
+    }
+    let status = status_line
+        .next()
+        .ok_or_else(|| error("missing GitHub API status code"))?
+        .parse::<u16>()
+        .map_err(error)?;
+    if !(100..600).contains(&status) {
+        return Err(error("invalid GitHub API status code"));
+    }
+    Ok((status, body.as_bytes().to_vec()))
+}
+
+fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), String> {
+    let endpoint =
+        format!("https://api.github.com/repos/wavefnd/Wave/attestations/sha256:{digest}");
+    // An explicit 404 is absence; authentication, rate-limit and transport
+    // failures must not be silently treated as an un-attested release.
+    let (status, body) = api(&endpoint)?;
+    if status == 404 {
         let _ = writeln!(
             std::io::stderr().lock(),
             "note: official Wave archive has no published GitHub provenance; SHA-256 verified"
         );
         return Ok(());
     }
-    if status != "200" {
+    if status != 200 {
         return Err(error(format!("provenance query failed with HTTP {status}")));
     }
-    let response: Value = serde_json::from_str(body).map_err(error)?;
+    let response: Value = serde_json::from_slice(&body).map_err(error)?;
     let attestations = response["attestations"]
         .as_array()
         .ok_or_else(|| error("invalid provenance response"))?;
@@ -433,6 +497,8 @@ fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), Stri
     drop(bundle_file);
     let verification = process::output(
         Command::new("gh")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
             .args(["attestation", "verify"])
             .arg(archive)
             .arg("--bundle")
@@ -666,6 +732,21 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn authenticated_api_preserves_http_errors_instead_of_treating_them_as_absence() {
+        for status in [200, 403, 404, 500] {
+            for newline in ["\n", "\r\n"] {
+                let response = format!("HTTP/2.0 {status} Status{newline}Content-Type: application/json{newline}{newline}{{\"attestations\":[]}}");
+                let (actual, body) = parse_api_response(response.as_bytes()).unwrap();
+                assert_eq!(actual, status);
+                assert_eq!(body, br#"{"attestations":[]}"#);
+            }
+        }
+        for response in ["", "{}", "error 404\n\n{}", "HTTP/2.0 bad\n\n{}"] {
+            assert!(parse_api_response(response.as_bytes()).is_err());
         }
     }
 
