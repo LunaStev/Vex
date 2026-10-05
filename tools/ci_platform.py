@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = json.loads((ROOT / 'platforms.json').read_text())['platforms']
@@ -41,8 +42,11 @@ def main():
     # No token, nightly fallback, draft access, or build-from-master substitution.
     url = f'https://api.github.com/repos/wavefnd/Wave/releases/tags/v{WAVE_VERSION}'
     request = urllib.request.Request(url, headers={'User-Agent': 'Vex-release-acceptance'})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        release = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            release = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'official public Wave v{WAVE_VERSION} is unavailable (HTTP {error.code}); platform acceptance cannot finish until its public release exists') from error
     if release.get('draft') is not False or release.get('tag_name') != f'v{WAVE_VERSION}':
         raise RuntimeError('required official Wave release is not public')
     asset_name = f"wave-v{WAVE_VERSION}-{target['wave_target']}.{target['archive']}"

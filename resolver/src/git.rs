@@ -36,6 +36,8 @@ pub(crate) fn ensure_repository(
         Error::environment(format!("failed to create `{}`: {error}", parent.display()))
     })?;
     status("Cloning", format!("{name} ({url})"));
+    // Cover both clone and the init/fetch path used for long destinations.
+    inject_failure("clone Git dependency")?;
     // clone exports an absolute GIT_DIR to index-pack, whose Windows setup has
     // a separate fixed-length guard even with core.longpaths. Initialize deep
     // candidates without transport, then let resolution fetch/checkout through
@@ -448,14 +450,19 @@ fn command() -> Command {
     command
 }
 
-fn run(command: &mut Command, action: &str) -> Result<(), Error> {
+fn inject_failure(_action: &str) -> Result<(), Error> {
     #[cfg(debug_assertions)]
-    if std::env::var("VEX_TEST_GIT_FAIL_ACTION").as_deref() == Ok(action) {
+    if std::env::var("VEX_TEST_GIT_FAIL_ACTION").as_deref() == Ok(_action) {
         return Err(
-            Error::environment(format!("injected Git operation failure: {action}"))
-                .with_field("operation", action),
+            Error::environment(format!("injected Git operation failure: {_action}"))
+                .with_field("operation", _action),
         );
     }
+    Ok(())
+}
+
+fn run(command: &mut Command, action: &str) -> Result<(), Error> {
+    inject_failure(action)?;
     let output = command
         .supervised_output()
         .map_err(|error| Error::environment(format!("failed to start git to {action}: {error}")))?;

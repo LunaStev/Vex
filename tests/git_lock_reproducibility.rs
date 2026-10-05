@@ -1358,41 +1358,47 @@ fn fixture_compiler(root: &Path) -> PathBuf {
 
 #[test]
 fn failed_clone_keeps_old_graph_and_never_publishes_partial_checkout() {
-    let fixture = TestDir::new();
-    let dep = fixture.path().join("dep");
-    let next = fixture.path().join("next");
-    let app = fixture.path().join("app");
-    for (path, name) in [(&dep, "dep"), (&next, "next")] {
-        create_package(path, name, &[]);
-        init_git(path);
-        commit_all(path, "initial");
+    for long_path in [false, true] {
+        let fixture = TestDir::new();
+        let dep = fixture.path().join("dep");
+        let next = fixture.path().join("next");
+        let app = if long_path {
+            fixture.path().join("nested".repeat(20)).join("app")
+        } else {
+            fixture.path().join("app")
+        };
+        for (path, name) in [(&dep, "dep"), (&next, "next")] {
+            create_package(path, name, &[]);
+            init_git(path);
+            commit_all(path, "initial");
+        }
+        create_package(&app, "app", &[("dep", git_url(&dep), None)]);
+        assert_success(&vex(&app, &["fetch"]), "initial");
+        let original_manifest = fs::read(app.join("vex.ws")).unwrap();
+        let original_lock = fs::read(app.join("vex.lock")).unwrap();
+        let old_checkouts = fs::read_dir(app.join(".vex/deps")).unwrap().count();
+        create_package(
+            &app,
+            "app",
+            &[("dep", git_url(&dep), None), ("next", git_url(&next), None)],
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+            .current_dir(&app)
+            .env("VEX_TEST_GIT_FAIL_ACTION", "clone Git dependency")
+            .arg("fetch")
+            .output()
+            .unwrap();
+        assert_failure(&output, "injected clone failure");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("clone Git dependency"));
+        assert_eq!(fs::read(app.join("vex.lock")).unwrap(), original_lock);
+        assert_eq!(
+            fs::read_dir(app.join(".vex/deps")).unwrap().count(),
+            old_checkouts
+        );
+        fs::write(app.join("vex.ws"), original_manifest).unwrap();
+        assert_success(
+            &vex(&app, &["fetch", "--locked", "--offline"]),
+            "preserved old graph",
+        );
     }
-    create_package(&app, "app", &[("dep", git_url(&dep), None)]);
-    assert_success(&vex(&app, &["fetch"]), "initial");
-    let original_manifest = fs::read(app.join("vex.ws")).unwrap();
-    let original_lock = fs::read(app.join("vex.lock")).unwrap();
-    let old_checkouts = fs::read_dir(app.join(".vex/deps")).unwrap().count();
-    create_package(
-        &app,
-        "app",
-        &[("dep", git_url(&dep), None), ("next", git_url(&next), None)],
-    );
-    let output = Command::new(env!("CARGO_BIN_EXE_vex"))
-        .current_dir(&app)
-        .env("VEX_TEST_GIT_FAIL_ACTION", "clone Git dependency")
-        .arg("fetch")
-        .output()
-        .unwrap();
-    assert_failure(&output, "injected clone failure");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("clone Git dependency"));
-    assert_eq!(fs::read(app.join("vex.lock")).unwrap(), original_lock);
-    assert_eq!(
-        fs::read_dir(app.join(".vex/deps")).unwrap().count(),
-        old_checkouts
-    );
-    fs::write(app.join("vex.ws"), original_manifest).unwrap();
-    assert_success(
-        &vex(&app, &["fetch", "--locked", "--offline"]),
-        "preserved old graph",
-    );
 }
