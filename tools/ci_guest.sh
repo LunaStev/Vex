@@ -7,7 +7,7 @@ case "$(uname -s)" in
   Linux)
     vex_guest_python=python3
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git python3 build-essential pkg-config gh
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl git python3 build-essential pkg-config gh procps
     ;;
   FreeBSD)
     vex_guest_python=python3.11
