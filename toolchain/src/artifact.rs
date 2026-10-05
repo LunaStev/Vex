@@ -50,19 +50,22 @@ pub(super) fn version(value: &str) -> Result<String, String> {
 }
 
 fn target(os: &str, arch: &str) -> Result<&'static str, String> {
-    match (os, arch) {
-        ("linux", "x86_64") => Ok("x86_64-linux-gnu"),
-        ("linux", "aarch64") => Ok("aarch64-linux-gnu"),
-        ("linux", "riscv64") => Ok("riscv64-linux-gnu"),
-        ("linux", "loongarch64") => Ok("loongarch64-linux-gnu"),
-        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
-        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
-        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
-        ("windows", "aarch64") => Ok("aarch64-pc-windows-msvc"),
-        _ => Err(error(format!(
-            "no supported compiler artifact for host {os}/{arch}"
-        ))),
-    }
+    static PLATFORMS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let table = PLATFORMS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../platforms.json"))
+            .expect("validated platform table")
+    });
+    table["platforms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["os"] == os && p["arch"] == arch)
+        .and_then(|p| p["wave_target"].as_str())
+        .ok_or_else(|| {
+            error(format!(
+                "no supported compiler artifact for host {os}/{arch}"
+            ))
+        })
 }
 
 fn curl(url: &str) -> Command {
@@ -123,7 +126,8 @@ struct ReleasePlan {
     version: String,
     name: String,
     archive_url: String,
-    checksum_url: String,
+    checksum_url: Option<String>,
+    asset_digest: Option<String>,
 }
 fn select_release(
     release: &Value,
@@ -163,13 +167,34 @@ fn select_release(
         Ok(url)
     };
     let archive_url = asset(&name)?.to_owned();
-    let checksum_url = asset("SHA256SUMS")?.to_owned();
+    let checksum_url = if assets.iter().any(|a| a["name"] == "SHA256SUMS") {
+        Some(asset("SHA256SUMS")?.to_owned())
+    } else {
+        None
+    };
+    let digest_value = &assets.iter().find(|a| a["name"] == name).unwrap()["digest"];
+    let asset_digest = if digest_value.is_null() {
+        None
+    } else {
+        let digest = digest_value
+            .as_str()
+            .and_then(|s| s.strip_prefix("sha256:"))
+            .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| error("invalid official asset SHA-256 digest"))?;
+        Some(digest.to_ascii_lowercase())
+    };
+    if checksum_url.is_none() && asset_digest.is_none() {
+        return Err(error(
+            "release has neither SHA256SUMS nor an official asset SHA-256 digest",
+        ));
+    }
     Ok(ReleasePlan {
         tag: tag.into(),
         version,
         name,
         archive_url,
         checksum_url,
+        asset_digest,
     })
 }
 
@@ -188,9 +213,25 @@ pub fn install(requested: Option<&str>) -> Result<PathBuf, String> {
         name,
         archive_url,
         checksum_url,
+        asset_digest,
     } = select_release(&release, requested.as_deref(), target, extension)?;
-    let checksum_text = String::from_utf8(get(&checksum_url)?).map_err(error)?;
-    let expected = checksum(&checksum_text, &name)?;
+    let checksum_digest = checksum_url
+        .as_deref()
+        .map(|url| {
+            let text = String::from_utf8(get(url)?).map_err(error)?;
+            checksum(&text, &name)
+        })
+        .transpose()?;
+    let expected = agree_digests(checksum_digest.as_deref(), asset_digest.as_deref())?;
+    if let Some(pin) = std::env::var_os("VEX_WAVEC_ARCHIVE_SHA256") {
+        let pin = pin
+            .to_str()
+            .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| error("VEX_WAVEC_ARCHIVE_SHA256 must be a SHA-256 digest"))?;
+        if !pin.eq_ignore_ascii_case(&expected) {
+            return Err(error("official compiler digest differs from VEX_WAVEC_ARCHIVE_SHA256; installation unchanged"));
+        }
+    }
     let root = home()?;
     fs::create_dir_all(&root).map_err(error)?;
     state::reject_link(&root)?;
@@ -366,10 +407,25 @@ fn verify_provenance(archive: &Path, digest: &str, tag: &str) -> Result<(), Stri
         .as_str()
         .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
         .ok_or_else(|| error("release tag has no valid source commit"))?;
+    // Use the public API response as a local bundle. gh can verify this without
+    // repository credentials; no CI token crosses into an emulated/VM guest.
+    let bundle_path = archive.with_extension("attestations.jsonl");
+    let mut bundle_file = File::create_new(&bundle_path).map_err(error)?;
+    for attestation in attestations {
+        let bundle = attestation
+            .get("bundle")
+            .filter(|value| value.is_object())
+            .ok_or_else(|| error("published provenance contains an invalid bundle"))?;
+        serde_json::to_writer(&mut bundle_file, bundle).map_err(error)?;
+        bundle_file.write_all(b"\n").map_err(error)?;
+    }
+    drop(bundle_file);
     let verification = process::output(
         Command::new("gh")
             .args(["attestation", "verify"])
             .arg(archive)
+            .arg("--bundle")
+            .arg(&bundle_path)
             .args([
                 "--repo",
                 "wavefnd/Wave",
@@ -405,6 +461,16 @@ fn create_stage(root: &Path) -> Result<PathBuf, String> {
     }
     Err(error("could not allocate installation staging directory"))
 }
+fn agree_digests(checksum: Option<&str>, asset: Option<&str>) -> Result<String, String> {
+    match (checksum, asset) {
+        (Some(a), Some(b)) if !a.eq_ignore_ascii_case(b) => {
+            Err(error("SHA256SUMS and official asset digest disagree"))
+        }
+        (Some(a), _) | (_, Some(a)) => Ok(a.to_ascii_lowercase()),
+        _ => Err(error("release integrity information is missing")),
+    }
+}
+
 fn checksum(text: &str, filename: &str) -> Result<String, String> {
     let mut found = None;
     for line in text.lines() {
@@ -603,6 +669,7 @@ mod tests {
             ("macos", "aarch64", "aarch64-apple-darwin", "tar.gz"),
             ("windows", "x86_64", "x86_64-pc-windows-msvc", "zip"),
             ("windows", "aarch64", "aarch64-pc-windows-msvc", "zip"),
+            ("freebsd", "x86_64", "x86_64-unknown-freebsd", "tar.gz"),
         ] {
             assert_eq!(target(os, arch).unwrap(), expected);
             let name = format!("wave-v0.2.1-pre-beta-{expected}.{extension}");
@@ -623,15 +690,26 @@ mod tests {
                 .unwrap_err()
                 .contains(&name));
         }
-        for (os, arch) in [
-            ("freebsd", "x86_64"),
-            ("windows", "x86"),
-            ("linux", "arm"),
-            ("linux", "wasm64"),
-        ] {
+        for (os, arch) in [("windows", "x86"), ("linux", "arm"), ("linux", "wasm64")] {
             let message = target(os, arch).unwrap_err();
             assert!(message.contains(&format!("{os}/{arch}")));
         }
+    }
+
+    #[test]
+    fn release_digest_sources_are_strict_and_must_agree() {
+        let name = "wave-v0.2.1-pre-beta-x86_64-linux-gnu.tar.gz";
+        let mut release = fake_release(name);
+        release["assets"].as_array_mut().unwrap().pop();
+        assert!(select_release(&release, None, "x86_64-linux-gnu", "tar.gz").is_err());
+        release["assets"][0]["digest"] = serde_json::json!(format!("sha256:{}", "a".repeat(64)));
+        let plan = select_release(&release, None, "x86_64-linux-gnu", "tar.gz").unwrap();
+        assert!(plan.checksum_url.is_none());
+        assert_eq!(plan.asset_digest.as_deref(), Some("a".repeat(64).as_str()));
+        assert!(agree_digests(Some(&"a".repeat(64)), Some(&"b".repeat(64))).is_err());
+        assert!(agree_digests(None, None).is_err());
+        release["assets"][0]["digest"] = serde_json::json!("sha256:bad");
+        assert!(select_release(&release, None, "x86_64-linux-gnu", "tar.gz").is_err());
     }
 
     fn fake_release(name: &str) -> Value {

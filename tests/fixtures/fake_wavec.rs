@@ -19,6 +19,10 @@ fn main() {
         return;
     }
     let args = env::args_os().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|a| a == "--version") {
+        println!("wavec 0.2.1-pre-beta");
+        return;
+    }
     if env::current_exe().unwrap().file_stem().unwrap() == "runner" {
         let status = std::process::Command::new(&args[0]).args(&args[1..]).status().unwrap();
         std::process::exit(status.code().unwrap_or(1));

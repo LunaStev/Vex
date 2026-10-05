@@ -1,0 +1,15 @@
+{
+  "version": "0.2.1-pre-beta",
+  "source": "c6f9ae7f562de003d4dc3810f018ba4a1888d5f3",
+  "archives": {
+    "linux-amd64": "0d63662fa18d46603bbad81d5e1c647208429ef39cb5c73633023e2ea7e6252e",
+    "linux-arm64": "9426cd5c41a5994e83ecadcd55b31026b21124041be16dc8ed621530880234e6",
+    "linux-riscv64": "b5e1d0fcff898948a7a663221336848a8f3e76ca4599cb54c3a5b43716f8927e",
+    "linux-loongarch64": "facd2d72f84234a44839eebde61c2f8600d8232771ac8ec0fb035f053c1534fa",
+    "macos-amd64": "93b6f945ea4ee3d3fbf9bdf6ae2fc0c51193144b8812e580eb955004d93e5d95",
+    "macos-arm64": "e75d8237ab35787cf699ce9db451de89e95d13b89c5523fbfffb2aeb3bfb4547",
+    "windows-amd64": "389fbe9847cfb5aa6566fc2e97d75311ef75fe9f337a912c7149013a0dd3b63b",
+    "windows-arm64": "417eca5ade7379fa4f66ab1a875bb13e0c3505d65e65e19bd09f8c1393828bb4",
+    "freebsd-amd64": "10d31d090fb99b548f80262662fd3c7c3b20a7c6e954daa7b779aa5176552fe0"
+  }
+}
