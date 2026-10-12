@@ -408,7 +408,7 @@ class ReleaseToolTests(unittest.TestCase):
             writer = "create_zip_archive" if target.archive == "zip" else "create_tar_archive"
             extension = ".zip" if target.archive == "zip" else ".tar.gz"
             for existing in [False, True]:
-                for failure in ["write", "verify", "replace", None]:
+                for failure in ["write", "verify", "chmod", "replace", None]:
                     with self.subTest(triple=triple, existing=existing, failure=failure), tempfile.TemporaryDirectory() as temporary:
                         root = Path(temporary)
                         stage = root / "package"
@@ -434,12 +434,18 @@ class ReleaseToolTests(unittest.TestCase):
                                 raise release_tool.ReleaseError("injected verification failure")
 
                         original_replace = Path.replace
+                        original_chmod = Path.chmod
+                        def chmod(candidate, mode):
+                            if failure == "chmod":
+                                raise OSError("injected permission failure")
+                            return original_chmod(candidate, mode)
+
                         def replace(source, destination):
                             if failure == "replace":
                                 raise OSError("injected replacement failure")
                             return original_replace(source, destination)
 
-                        with mock.patch.object(release_tool, writer, side_effect=write), mock.patch.object(Path, "replace", replace):
+                        with mock.patch.object(release_tool, writer, side_effect=write), mock.patch.object(Path, "replace", replace), mock.patch.object(Path, "chmod", chmod):
                             if failure:
                                 with self.assertRaises((OSError, release_tool.ReleaseError)):
                                     release_tool.create_archive(stage, target, 0, verify=verify)
@@ -450,6 +456,24 @@ class ReleaseToolTests(unittest.TestCase):
                                 self.assertEqual(release_tool.create_archive(stage, target, 0, verify=verify), archive)
                                 self.assertEqual(archive.read_bytes(), b"replacement")
                         self.assertEqual(set(root.iterdir()), {stage, archive} if archive.exists() else {stage})
+
+    @unittest.skipIf(os.name == "nt", "POSIX archive permissions")
+    def test_published_archives_are_readable_by_other_users(self) -> None:
+        for triple in ["riscv64gc-unknown-linux-gnu", "loongarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]:
+            with self.subTest(triple=triple), tempfile.TemporaryDirectory() as temporary:
+                target = release_tool.SUPPORTED_TARGETS[triple]
+                root = Path(temporary)
+                self.make_package_inputs(root, target, b"release binary")
+                stage = release_tool.prepare_stage("0.0.2-beta", target, root=root)
+                previous_umask = os.umask(0o077)
+                try:
+                    archive = release_tool.create_archive(stage, target, 1_700_000_000)
+                finally:
+                    os.umask(previous_umask)
+                self.assertEqual(archive.stat().st_mode & 0o777, 0o644)
+                read = release_tool.read_binary_from_zip if target.archive == "zip" else release_tool.read_binary_from_tar
+                _, binary = read(archive, f"{stage.name}/{target.executable_name}")
+                self.assertEqual(binary, b"release binary")
 
     @staticmethod
     def make_package_inputs(root: Path, target: object, binary: bytes) -> None:

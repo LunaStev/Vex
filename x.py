@@ -339,6 +339,10 @@ def create_archive(
             create_tar_archive(stage, temporary, epoch)
         if verify is not None:
             verify(temporary)
+        # NamedTemporaryFile starts at 0600. Release artifacts must also be
+        # readable by the host runner when a root-owned container creates them.
+        # Set the final mode before publication so failure preserves the old file.
+        temporary.chmod(0o644)
         temporary.replace(archive)
     finally:
         temporary.unlink(missing_ok=True)
