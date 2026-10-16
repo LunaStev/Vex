@@ -299,18 +299,31 @@ fn set_target(slot: &mut Option<String>, value: &str) -> Result<(), Error> {
     Ok(())
 }
 fn host_targets() -> Vec<String> {
+    host_targets_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn host_targets_for(os: &str, arch: &str) -> Vec<String> {
     let platforms: Value = serde_json::from_str(include_str!("../../platforms.json"))
         .expect("validated platform table");
     platforms["platforms"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["os"] == std::env::consts::OS && p["arch"] == std::env::consts::ARCH)
+        .find(|p| p["os"] == os && p["arch"] == arch)
         .map(|p| {
-            vec![
-                p["wave_target"].as_str().unwrap().into(),
-                p["rust_target"].as_str().unwrap().into(),
-            ]
+            // wave_target names the release archive, not necessarily the
+            // compiler capability. In particular Rust uses riscv64gc while
+            // Wave advertises riscv64-unknown-linux-gnu.
+            let mut targets = vec![
+                p["wave_target"].as_str().unwrap().to_owned(),
+                p["rust_target"].as_str().unwrap().to_owned(),
+            ];
+            if os == "linux" {
+                targets.push(format!("{arch}-unknown-linux-gnu"));
+            }
+            targets.sort();
+            targets.dedup();
+            targets
         })
         .unwrap_or_default()
 }
@@ -584,4 +597,37 @@ fn inspect_project(
     // Keep resolution's shared lease alive through compiler planning so updates
     // cannot replace dependency source while the compiler reads it.
     drop(resolution);
+}
+
+#[cfg(test)]
+mod host_target_tests {
+    use super::host_targets_for;
+
+    #[test]
+    fn every_supported_host_matches_its_compiler_capability() {
+        // Capability names from the public Wave 0.2.1 release, deliberately
+        // independent from the archive-name mapping in platforms.json.
+        for (os, arch, capability) in [
+            ("linux", "x86_64", "x86_64-unknown-linux-gnu"),
+            ("linux", "aarch64", "aarch64-unknown-linux-gnu"),
+            ("linux", "riscv64", "riscv64-unknown-linux-gnu"),
+            ("linux", "loongarch64", "loongarch64-unknown-linux-gnu"),
+            ("macos", "x86_64", "x86_64-apple-darwin"),
+            ("macos", "aarch64", "aarch64-apple-darwin"),
+            ("windows", "x86_64", "x86_64-pc-windows-msvc"),
+            ("windows", "aarch64", "aarch64-pc-windows-msvc"),
+            ("freebsd", "x86_64", "x86_64-unknown-freebsd"),
+        ] {
+            let targets = host_targets_for(os, arch);
+            assert!(
+                targets.iter().any(|target| target == capability),
+                "{os}/{arch}: {targets:?}"
+            );
+            assert!(
+                targets.iter().all(|target| target.starts_with(arch)),
+                "{targets:?}"
+            );
+        }
+        assert!(host_targets_for("linux", "unsupported").is_empty());
+    }
 }

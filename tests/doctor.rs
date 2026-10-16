@@ -90,7 +90,13 @@ fn host_target() -> String {
         .unwrap()
         .iter()
         .find(|p| p["os"] == std::env::consts::OS && p["arch"] == std::env::consts::ARCH)
-        .map(|p| p["wave_target"].as_str().unwrap().to_owned())
+        .map(|p| {
+            if p["os"] == "linux" {
+                format!("{}-unknown-linux-gnu", p["arch"].as_str().unwrap())
+            } else {
+                p["rust_target"].as_str().unwrap().to_owned()
+            }
+        })
         .unwrap_or_else(|| "test-host".into())
 }
 fn fake() -> &'static Path {

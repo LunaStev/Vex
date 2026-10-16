@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod support;
-use support::git_url;
+use support::{git_path, git_url};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -194,10 +194,10 @@ fn incomplete_graph_and_pending_recovery_refuse_prune_without_mutation_or_networ
         }
         let trace = fixture.root.join("trace.jsonl");
         let before = snapshot(&fixture.app);
-        let output = Command::new(env!("CARGO_BIN_EXE_vex"))
+        let output = foreground(Command::new(env!("CARGO_BIN_EXE_vex")))
             .current_dir(&fixture.app)
             .args(["prune", "--apply"])
-            .env("GIT_TRACE2_EVENT", &trace)
+            .env("GIT_TRACE2_EVENT", git_path(&trace))
             .output()
             .unwrap();
         assert!(!output.status.success(), "{problem}");
@@ -386,7 +386,7 @@ fn package(path: &Path, name: &str, dependencies: &str) {
 
 fn git(path: &Path, args: &[&str]) {
     success(
-        &Command::new("git")
+        &foreground(Command::new("git"))
             .args([
                 "-c",
                 "user.name=Vex Test",
@@ -406,7 +406,7 @@ fn commit(path: &Path) {
 }
 
 fn vex(path: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_vex"))
+    foreground(Command::new(env!("CARGO_BIN_EXE_vex")))
         .current_dir(path)
         .args(args)
         .output()
@@ -422,6 +422,19 @@ fn success(output: &Output) {
     );
 }
 
+// Git 2.55+ may detach post-commit/fetch maintenance. Its temporary files
+// otherwise race the strict whole-project snapshots even after the initiating
+// command exits. Keep maintenance enabled but wait for it in these fixtures.
+fn foreground(mut command: Command) -> Command {
+    command
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "maintenance.autoDetach")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .env("GIT_CONFIG_KEY_1", "gc.autoDetach")
+        .env("GIT_CONFIG_VALUE_1", "false");
+    command
+}
+
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn visit(root: &Path, path: &Path, result: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(path).unwrap() {
@@ -431,7 +444,11 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
                 result.insert(relative, Vec::new());
                 visit(root, &path, result);
             } else {
-                result.insert(relative, fs::read(path).unwrap());
+                result.insert(
+                    relative,
+                    fs::read(&path)
+                        .unwrap_or_else(|error| panic!("snapshot {}: {error}", path.display())),
+                );
             }
         }
     }

@@ -4,7 +4,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod support;
-use support::git_url;
+use support::{git_path, git_url};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -249,11 +249,17 @@ fn traced_vex(app: &Path, args: &[&str]) -> (Output, Vec<String>) {
     let output = Command::new(env!("CARGO_BIN_EXE_vex"))
         .current_dir(app)
         .args(args)
-        .env("GIT_TRACE2_EVENT", &trace)
+        .env("GIT_TRACE2_EVENT", git_path(&trace))
         .output()
         .unwrap();
-    let commands = fs::read_to_string(trace)
-        .unwrap_or_default()
+    let commands = fs::read_to_string(&trace)
+        .unwrap_or_else(|error| {
+            panic!(
+                "missing Git trace {}: {error}; stderr: {}",
+                trace.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .filter(|event| event["event"] == "cmd_name")

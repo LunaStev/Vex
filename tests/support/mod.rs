@@ -6,27 +6,27 @@
 use std::fmt::Write;
 use std::path::Path;
 
-pub fn git_url(path: &Path) -> String {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path = path.to_string_lossy();
+/// Git's trace destinations and command-line paths do not accept Rust's
+/// verbatim Windows prefix. Keep filesystem spelling (not URL escaping).
+pub fn git_path(path: &Path) -> String {
+    normalize_git_path(&path.to_string_lossy(), cfg!(windows))
+}
 
-    #[cfg(windows)]
-    let path = {
+pub fn normalize_git_path(path: &str, windows: bool) -> String {
+    if windows {
         let path = path
             .strip_prefix(r"\\?\UNC\")
             .map(|rest| format!(r"\\{rest}"))
-            .unwrap_or_else(|| {
-                path.strip_prefix(r"\\?\")
-                    .unwrap_or(path.as_ref())
-                    .to_string()
-            });
+            .unwrap_or_else(|| path.strip_prefix(r"\\?\").unwrap_or(path).to_owned());
         path.replace('\\', "/")
-    };
+    } else {
+        path.to_owned()
+    }
+}
 
-    #[cfg(not(windows))]
-    let path = path.into_owned();
-
-    let path = percent_encode_path(&path);
+pub fn git_url(path: &Path) -> String {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = percent_encode_path(&git_path(&path));
     if path.starts_with("//") {
         format!("file:{path}")
     } else if path.starts_with('/') {
