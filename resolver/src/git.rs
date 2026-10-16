@@ -8,12 +8,19 @@ use lockfile::LOCKFILE_NAME;
 
 use crate::paths::{git_cli_path, validate_managed_checkout_path};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepositoryState {
+    Existing,
+    Cloned,
+    Initialized,
+}
+
 pub(crate) fn ensure_repository(
     destination: &Path,
     url: &str,
     name: &str,
     status: &mut dyn FnMut(&str, String),
-) -> Result<bool, Error> {
+) -> Result<RepositoryState, Error> {
     validate_managed_checkout_path(destination)?;
     if destination.exists() {
         if !destination.join(".git").is_dir() {
@@ -23,7 +30,7 @@ pub(crate) fn ensure_repository(
             )));
         }
         verify_origin(destination, url)?;
-        return Ok(false);
+        return Ok(RepositoryState::Existing);
     }
 
     let parent = destination.parent().ok_or_else(|| {
@@ -89,7 +96,11 @@ pub(crate) fn ensure_repository(
         ]),
         "store credential-free Git origin",
     )?;
-    Ok(unborn)
+    Ok(if unborn {
+        RepositoryState::Initialized
+    } else {
+        RepositoryState::Cloned
+    })
 }
 
 fn advertised_object_format(advertised: &str) -> Result<&'static str, Error> {
@@ -140,7 +151,7 @@ pub(crate) fn require_local_repository(
     Ok(())
 }
 
-fn verify_origin(destination: &Path, expected: &str) -> Result<(), Error> {
+pub(crate) fn verify_origin(destination: &Path, expected: &str) -> Result<(), Error> {
     // Read declarations, not `remote get-url`, which expands user insteadOf rules.
     // NUL delimiters preserve URLs containing whitespace and detect multiple values.
     let output = command_in(destination)
@@ -495,6 +506,17 @@ pub(crate) fn stdout(command: &mut Command, action: &str) -> Result<String, Erro
 /// Quiet rev-parse uses status 1 for a missing/unresolvable revision. Other
 /// failures remain environmental; never classify localized stderr text.
 pub(crate) fn resolve_reference(destination: &Path, reference: &str) -> Result<String, Error> {
+    try_resolve_reference(destination, reference)?.ok_or_else(|| {
+        Error::resolution(format!(
+            "cannot resolve Git dependency reference `{reference}`"
+        ))
+    })
+}
+
+pub(crate) fn try_resolve_reference(
+    destination: &Path,
+    reference: &str,
+) -> Result<Option<String>, Error> {
     let output = command_in(destination)
         .args([
             "rev-parse",
@@ -505,11 +527,13 @@ pub(crate) fn resolve_reference(destination: &Path, reference: &str) -> Result<S
         ])
         .supervised_output()?;
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        ));
     }
     let message = format!("cannot resolve Git dependency reference `{reference}`");
     if output.status.code() == Some(1) {
-        Err(Error::resolution(message))
+        Ok(None)
     } else {
         Err(Error::environment(git_error(
             &message,

@@ -17,7 +17,7 @@ pub fn run() -> i32 {
     match run_reported() {
         Ok(code) => code,
         Err(error) => {
-            crate::ui::error(&error);
+            crate::ui::diagnostic(&error);
             error.category.code()
         }
     }
@@ -35,13 +35,19 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
     let mut selection = crate::project::Selection::default();
     let mut args = Vec::new();
     let mut runtime = Vec::new();
+    let mut quiet = false;
+    let mut verbosity = 0_u8;
     while let Some(arg) = raw.next() {
         if arg == "--" {
             args.push("--".to_owned());
             runtime.extend(raw);
             break;
         }
-        if arg == "--message-file" || arg == "--manifest-path" {
+        if arg == "--quiet" || arg == "-q" {
+            quiet = true;
+        } else if arg == "--verbose" || arg == "-v" || arg == "-vv" {
+            verbosity = (verbosity + if arg == "-vv" { 2 } else { 1 }).min(2);
+        } else if arg == "--message-file" || arg == "--manifest-path" {
             let slot = if arg == "--message-file" {
                 &mut path
             } else {
@@ -68,8 +74,14 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
             })?);
         }
     }
+    if quiet && verbosity > 0 {
+        return Err(Error::usage(
+            "--quiet and --verbose cannot be used together",
+        ));
+    }
+    crate::ui::configure(quiet, verbosity);
     let command = args.first().map(String::as_str).unwrap_or("help");
-    let dry_run = matches!(command, "build" | "check" | "run")
+    let dry_run = matches!(command, "build" | "check" | "run" | "clean" | "prune")
         && args
             .iter()
             .skip(1)
@@ -89,9 +101,9 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            crate::ui::error(&error);
+            crate::ui::diagnostic(&error);
             if let Err(log_error) = messages.diagnostic(&error) {
-                crate::ui::error(&log_error);
+                crate::ui::diagnostic(&log_error);
                 return Ok(if error.category == diagnostic::Category::Cancelled {
                     error.category.code()
                 } else {
@@ -103,7 +115,7 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
     };
     if let Err(error) = messages.emit(json!({"event":"finished", "success":outcome.code == 0,
         "origin":outcome.origin, "category":outcome.category, "exit_code":outcome.code, "signal":outcome.signal})) {
-        if outcome.origin == "program" { crate::ui::warning(&error); } else { crate::ui::error(&error); }
+        if outcome.origin == "program" { crate::ui::warning(&error); } else { crate::ui::diagnostic(&error); }
         // Once the user program has executed, logging cannot replace its outcome.
         if outcome.origin != "program" && outcome.category != "cancelled" { return Ok(error.category.code()); }
     }
@@ -144,6 +156,9 @@ fn dispatch(
                 | "tree"
                 | "metadata"
                 | "setup"
+                | "clean"
+                | "prune"
+                | "doctor"
         ) {
         help_args = vec![args[0].clone(), "--help".into()];
         help_args.as_slice()
@@ -153,7 +168,17 @@ fn dispatch(
     if selection.manifest_path.is_some()
         && !matches!(
             args[0].as_str(),
-            "build" | "run" | "check" | "fetch" | "update" | "info" | "tree" | "metadata"
+            "build"
+                | "run"
+                | "check"
+                | "fetch"
+                | "update"
+                | "info"
+                | "tree"
+                | "metadata"
+                | "clean"
+                | "prune"
+                | "doctor"
         )
     {
         return Err(Error::usage(
@@ -173,6 +198,15 @@ fn dispatch(
             crate::commands::metadata::metadata(&args[1..], selection).map(|()| Outcome::success())
         }
         "setup" => setup(&args[1..]).map(|()| Outcome::success()),
+        "clean" => {
+            crate::commands::clean::clean(&args[1..], selection).map(|()| Outcome::success())
+        }
+        "prune" => {
+            crate::commands::prune::prune(&args[1..], selection).map(|()| Outcome::success())
+        }
+        "doctor" => {
+            crate::commands::doctor::doctor(&args[1..], selection).map(|()| Outcome::success())
+        }
         "--version" | "-V" | "version" if args.len() == 1 => {
             print_version()?;
             Ok(Outcome::success())
@@ -204,7 +238,7 @@ fn print_help() -> Result<(), diagnostic::Error> {
     diagnostic::outln!();
     diagnostic::outln!("Usage:");
     diagnostic::outln!(
-        "  vex [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]"
+        "  vex [-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]"
     );
     diagnostic::outln!("  vex init [--lib]");
     diagnostic::outln!(
@@ -220,8 +254,19 @@ fn print_help() -> Result<(), diagnostic::Error> {
     diagnostic::outln!("  vex update [<package>...]");
     diagnostic::outln!("  vex info");
     diagnostic::outln!("  vex metadata [--format=json] [--locked] [--offline]");
-    diagnostic::outln!("  vex tree [--locked] [--offline]");
+    diagnostic::outln!("  vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]");
+    diagnostic::outln!("  vex clean [--dry-run]");
+    diagnostic::outln!("  vex prune [--apply] [--dry-run]");
+    diagnostic::outln!("  vex doctor [--format=json] [--target <triple>]");
     diagnostic::outln!("  vex setup wavec [--version <version>] [--script-fallback]");
     diagnostic::outln!("  vex --version");
+    diagnostic::outln!();
+    diagnostic::outln!("Output:");
+    diagnostic::outln!(
+        "  -q, --quiet    Hide Vex progress; keep results, warnings, errors, and program output"
+    );
+    diagnostic::outln!(
+        "  -v, --verbose  Show decisions; repeat (-vv) for redacted diagnostic detail"
+    );
     Ok(())
 }

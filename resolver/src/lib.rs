@@ -9,7 +9,10 @@ use manifest::Manifest;
 mod git;
 mod graph;
 mod paths;
+mod prune;
 mod transaction;
+
+pub use prune::{prune, PruneEntry, PruneReport};
 
 pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), Error> {
     transaction::recover(guard.root(), dry_run).map_err(|error| {
@@ -129,7 +132,21 @@ where
         ));
     }
 
+    report_policy(&options, &mut status);
+    status(
+        "Trace",
+        if options.dry_run {
+            "project lease: acquiring shared access for read-only resolution"
+        } else {
+            "project lease: acquiring exclusive access for dependency resolution and publication"
+        }
+        .into(),
+    );
     let guard = state::Guard::acquire(options.dry_run, &mut status).map_err(Error::environment)?;
+    status(
+        "Trace",
+        "project lease: acquired before reading vex.lock".into(),
+    );
     resolve_guarded(manifest, options, status, guard, &mut validate)
 }
 
@@ -137,27 +154,59 @@ where
 pub fn inspect(
     manifest: &Manifest,
     locked: bool,
-    status: impl FnMut(&str, String),
+    mut status: impl FnMut(&str, String),
 ) -> Result<Resolution, Error> {
-    let guard = state::Guard::acquire_existing(status).map_err(Error::resolution)?;
-    resolve_guarded(
-        manifest,
-        ResolveOptions {
-            dry_run: true,
-            offline: true,
-            locked,
-            update: UpdatePolicy::ReuseLocked,
-        },
-        |_, _| {},
-        guard,
-        &mut |_| Ok(()),
-    )
-    .map_err(|e| {
+    let options = ResolveOptions {
+        dry_run: true,
+        offline: true,
+        locked,
+        update: UpdatePolicy::ReuseLocked,
+    };
+    report_policy(&options, &mut status);
+    status(
+        "Trace",
+        "project lease: acquiring existing shared access for read-only local inspection".into(),
+    );
+    let guard = state::Guard::acquire_existing(&mut status).map_err(Error::resolution)?;
+    status(
+        "Trace",
+        "project lease: acquired before reading vex.lock".into(),
+    );
+    resolve_guarded(manifest, options, status, guard, &mut |_| Ok(())).map_err(|e| {
         Error::new(
             e.category,
             format!("{e}\nhelp: run `vex fetch` to prepare the local graph"),
         )
     })
+}
+
+fn report_policy(options: &ResolveOptions, status: &mut impl FnMut(&str, String)) {
+    let update = match &options.update {
+        UpdatePolicy::ReuseLocked => "reuse locked source selections".to_owned(),
+        UpdatePolicy::UpdateAll => "refresh all Git source selections".to_owned(),
+        UpdatePolicy::UpdateSelected(packages) => {
+            format!("refresh {} selected Git source(s)", packages.len())
+        }
+    };
+    status("Detail", format!("dependency policy: {update}"));
+    status(
+        "Detail",
+        if options.offline {
+            "network: disabled by offline mode; only local dependency sources may be used"
+        } else if options.dry_run {
+            "network: disabled by read-only resolution; fetch missing sources first"
+        } else {
+            "network: allowed for dependency retrieval and requested updates"
+        }
+        .into(),
+    );
+    status(
+        "Trace",
+        format!(
+            "resolver options: dry_run={}, locked={}, offline={}",
+            options.dry_run, options.locked, options.offline
+        ),
+    );
 }
 
 fn resolve_guarded<F: FnMut(&str, String)>(
@@ -170,6 +219,17 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     recover_project(&guard, options.dry_run)?;
     let existing = read_lockfile()?;
     let missing_lockfile = existing.is_none();
+    status(
+        "Trace",
+        match &existing {
+            Some(lockfile) => format!(
+                "lockfile: read version {} with {} package(s)",
+                lockfile.version,
+                lockfile.packages.len()
+            ),
+            None => "lockfile: vex.lock does not exist".into(),
+        },
+    );
     if options.locked
         && existing.as_ref().is_some_and(|lock| {
             lock.packages.iter().any(|package| {
@@ -275,6 +335,20 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     }
 
     let needs_lockfile = missing_lockfile || resolved != existing;
+    let lockfile_decision = if missing_lockfile {
+        "lockfile: write required because vex.lock is missing".to_owned()
+    } else if resolved.version != existing.version {
+        format!(
+            "lockfile: write required because format changes from {} to {}",
+            existing.version, resolved.version
+        )
+    } else if needs_lockfile {
+        "lockfile: write required because dependency graph or exact source selections changed"
+            .to_owned()
+    } else {
+        "lockfile: preserved because the resolved graph matches vex.lock".to_owned()
+    };
+    status("Detail", lockfile_decision);
     if needs_lockfile {
         if locked {
             return Err(Error::resolution(format!(
@@ -301,6 +375,12 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     }
 
     if let Some(transaction) = transaction {
+        status(
+            "Trace",
+            format!(
+                "dependency transaction: publishing staged state; update vex.lock={needs_lockfile}"
+            ),
+        );
         transaction
             .publish(needs_lockfile.then(|| lockfile::encode(resolved.clone())))
             .map_err(Error::environment)?;

@@ -8,4 +8,7 @@ pub mod setup;
 pub mod tree;
 pub mod update;
 
+pub mod clean;
+pub mod doctor;
 pub mod metadata;
+pub mod prune;

@@ -1,5 +1,5 @@
 use diagnostic::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -11,6 +11,11 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    /// The command-local selected executable, before entering a project directory.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn select() -> Result<Self, Error> {
         let cwd = std::env::current_dir().map_err(Error::environment)?;
         let find = |name: &std::ffi::OsStr| {
@@ -99,6 +104,20 @@ impl Compiler {
     }
 
     pub fn validate_target(&mut self, target: &str) -> Result<(), Error> {
+        let supported = self.supported_targets()?;
+        if !supported.iter().any(|available| available == target) {
+            let available = supported.join(", ");
+            return Err(Error::resolution(format!(
+                "unsupported target `{target}` for wavec `{}`\navailable targets: {available}",
+                self.path.display(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Query once per invocation; doctor uses the same validated capability data
+    /// as normal builds without resolving dependencies or creating project state.
+    pub fn supported_targets(&mut self) -> Result<&[String], Error> {
         if self.targets.is_none() {
             let output = process::output(
                 Command::new(&self.path).args(["print", "supported-targets", "--format=json"]),
@@ -131,14 +150,6 @@ impl Compiler {
             targets.dedup();
             self.targets = Some(targets);
         }
-        let targets = self.targets.as_ref().unwrap();
-        if !targets.iter().any(|supported| supported == target) {
-            return Err(Error::resolution(format!(
-                "unsupported target `{target}` for wavec `{}`\navailable targets: {}",
-                self.path.display(),
-                targets.join(", ")
-            )));
-        }
-        Ok(())
+        Ok(self.targets.as_deref().unwrap())
     }
 }

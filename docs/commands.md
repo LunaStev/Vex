@@ -10,7 +10,7 @@ See [manifest and operational contracts](reference.md) for field types, environm
 Vex - Wave package manager
 
 Usage:
-  vex [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]
+  vex [-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]
   vex init [--lib]
   vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
   vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]
@@ -19,9 +19,16 @@ Usage:
   vex update [<package>...]
   vex info
   vex metadata [--format=json] [--locked] [--offline]
-  vex tree [--locked] [--offline]
+  vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]
+  vex clean [--dry-run]
+  vex prune [--apply] [--dry-run]
+  vex doctor [--format=json] [--target <triple>]
   vex setup wavec [--version <version>] [--script-fallback]
   vex --version
+
+Output:
+  -q, --quiet    Hide Vex progress; keep results, warnings, errors, and program output
+  -v, --verbose  Show decisions; repeat (-vv) for redacted diagnostic detail
 ```
 
 ## init
@@ -69,13 +76,36 @@ usage: vex info
 ## tree
 
 ```text
-usage: vex tree [--locked] [--offline]
+usage: vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]
+  --invert <name>  Show the packages that depend on this package
+  --depth <n>      Show at most n edges from the displayed root (0: root only)
 ```
 
 ## metadata
 
 ```text
 usage: vex metadata [--format=json] [--locked] [--offline]
+```
+
+## doctor
+
+```text
+usage: vex doctor [--format=json] [--target <triple>]
+```
+
+## clean
+
+```text
+usage: vex clean [--dry-run]
+```
+
+## prune
+
+```text
+usage: vex prune [--apply] [--dry-run]
+  Preview unused, unchanged checkouts created by Vex
+  --apply    Delete only the verified unused checkouts
+  --dry-run  Preview without changing project state (also overrides --apply)
 ```
 
 ## setup

@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod artifacts;
 mod scaffold;
 pub use scaffold::initialize;
 
@@ -21,6 +22,14 @@ impl Guard {
     /// Read an already coordinated project without creating or repairing state.
     pub fn acquire_existing(mut waiting: impl FnMut(&str, String)) -> Result<Self, String> {
         Self::acquire_mode(true, false, &mut waiting)
+    }
+
+    /// Mutate explicitly selected owned state, without creating coordination or
+    /// recovering a transaction as a side effect of a cleanup command.
+    pub fn acquire_existing_exclusive(
+        mut waiting: impl FnMut(&str, String),
+    ) -> Result<Self, String> {
+        Self::acquire_mode(false, false, &mut waiting)
     }
 
     fn acquire_mode(
@@ -49,7 +58,7 @@ impl Guard {
         }
         inherit(&file).map_err(|e| format!("cannot protect compiler/Git child lifetime: {e}"))?;
         let guard = Self { _file: file, root };
-        scaffold::recover(guard.root(), shared)?;
+        scaffold::recover(guard.root(), shared || !create)?;
         Ok(guard)
     }
     pub fn root(&self) -> &Path {

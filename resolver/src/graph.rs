@@ -283,6 +283,7 @@ impl<'a> Resolver<'a> {
             .with_field("manifest", parent_manifest.display()));
         }
 
+        let mut record_checkout = None;
         let (resolved_path, locked_source) = match &dependency.source {
             DependencySource::Path { path } => {
                 let resolved = self.resolve_path(path, parent_manifest)?;
@@ -366,11 +367,29 @@ impl<'a> Resolver<'a> {
                     let same_source = self.existing.package(&dependency.name).is_some_and(|p| {
                         matches!(&p.source, LockedSource::Git { url: old, .. } if source::identity(old) == source::identity(url))
                     });
-                    if !same_source && previous.is_some() {
+                    let fresh = !same_source && previous.is_some();
+                    let migration =
+                        !live.exists() && previous.as_ref().is_some_and(|p| p != target);
+                    let copy_source = if fresh {
+                        None
+                    } else if migration {
+                        Some(self.root.join(previous.as_ref().unwrap()))
+                    } else {
+                        Some(live.clone())
+                    };
+                    // Validate the live source before copying. Copying can
+                    // normalize metadata (for example hard-link counts), which
+                    // must never restore an invalid deletion-ownership record.
+                    record_checkout = match copy_source.as_ref().filter(|path| path.exists()) {
+                        None => Some(false),
+                        Some(path) if crate::prune::trusted_checkout(path).is_ok() => Some(true),
+                        Some(_) => None,
+                    };
+                    if fresh {
                         transaction
                             .prepare_fresh(name)
                             .map_err(Error::environment)?;
-                    } else if !live.exists() && previous.as_ref().is_some_and(|p| p != target) {
+                    } else if migration {
                         transaction
                             .prepare_from(
                                 name,
@@ -386,16 +405,43 @@ impl<'a> Resolver<'a> {
                     } else {
                         transaction.prepare(name).map_err(Error::environment)?;
                     }
-                    transaction.path(name)
+                    let candidate = transaction.path(name);
+                    if record_checkout.is_none() {
+                        crate::prune::protect_checkout(&candidate)?;
+                    }
+                    candidate
                 } else {
                     live
                 };
                 let commit = if reuse {
+                    (self.status)(
+                        "Detail",
+                        format!(
+                            "{}: reuse locked local checkout{}; no Git transport",
+                            dependency.name,
+                            if self.options.dry_run {
+                                " (read-only)"
+                            } else if self.options.offline {
+                                " (offline)"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
                     locked_commit.unwrap()
                 } else {
                     self.resolve_git_commit(dependency, &destination)?
                 };
                 git::reject_submodules(&destination, name, &commit)?;
+                let logical_destination = self.logical(&destination);
+                (self.status)(
+                    "Trace",
+                    format!(
+                        "{}: selected Git commit {commit} at {}",
+                        dependency.name,
+                        logical_destination.display()
+                    ),
+                );
                 let source = LockedSource::Git {
                     url: source::identity(url),
                     branch: branch.clone(),
@@ -448,6 +494,18 @@ impl<'a> Resolver<'a> {
         self.visiting.push(dependency.name.clone());
         let dependencies = self.resolve_manifest_dependencies(&package_manifest)?;
         self.visiting.pop();
+
+        if let Some(replace) = record_checkout {
+            if let LockedSource::Git { url, commit, .. } = &locked_source {
+                crate::prune::record_checkout(
+                    &resolved_path,
+                    &dependency.name,
+                    url,
+                    commit,
+                    replace,
+                )?;
+            }
+        }
 
         self.packages.insert(
             dependency.name.clone(),
@@ -528,6 +586,13 @@ impl<'a> Resolver<'a> {
                 ))
             })?;
             git::require_checkout_at(destination, url, &dependency.name, &commit)?;
+            (self.status)(
+                "Detail",
+                format!(
+                    "{}: inspect locked local commit without checkout or Git transport",
+                    dependency.name
+                ),
+            );
             return Ok(commit);
         }
 
@@ -539,24 +604,46 @@ impl<'a> Resolver<'a> {
                 ))
             })?;
             git::require_local_repository(destination, url, &dependency.name, &commit)?;
+            (self.status)(
+                "Detail",
+                format!(
+                    "{}: select locally available locked commit in offline mode",
+                    dependency.name
+                ),
+            );
             git::checkout_commit(destination, &dependency.name, &commit, false)?;
             return Ok(commit);
         }
 
-        let unborn = git::ensure_repository(destination, url, &dependency.name, &mut *self.status)?;
+        let repository =
+            git::ensure_repository(destination, url, &dependency.name, &mut *self.status)?;
+        let unborn = repository == git::RepositoryState::Initialized;
         git::reject_dirty_checkout(destination, &dependency.name)?;
 
         if let Some(commit) = locked {
             if !git::has_commit(destination, &commit)? {
+                (self.status)(
+                    "Detail",
+                    format!(
+                        "{}: locked commit is absent locally; fetch the exact object",
+                        dependency.name
+                    ),
+                );
                 (self.status)("Fetching", format!("{} ({url})", dependency.name));
                 git::fetch_exact(destination, url, &dependency.name, &commit)?;
+            } else {
+                (self.status)(
+                    "Detail",
+                    format!(
+                        "{}: locked commit is already available; skip fetch",
+                        dependency.name
+                    ),
+                );
             }
             git::checkout_commit(destination, &dependency.name, &commit, unborn)?;
             return Ok(commit);
         }
 
-        (self.status)("Fetching", format!("{} ({url})", dependency.name));
-        git::fetch(destination, url)?;
         let reference = if let Some(branch) = branch {
             format!("refs/remotes/origin/{branch}^{{commit}}")
         } else if let Some(tag) = tag {
@@ -564,9 +651,47 @@ impl<'a> Resolver<'a> {
         } else if let Some(rev) = rev {
             format!("{rev}^{{commit}}")
         } else {
-            git::refresh_default_branch(destination, url)?;
             "refs/remotes/origin/HEAD^{commit}".to_string()
         };
+        // A real clone already transferred the advertised branch/tag objects
+        // and recorded the default branch. Reuse that snapshot when it contains
+        // the requested commit; init-only candidates and existing checkouts
+        // still need fetch, especially for an explicit update.
+        if repository == git::RepositoryState::Cloned {
+            if let Some(commit) = git::try_resolve_reference(destination, &reference)? {
+                (self.status)(
+                    "Detail",
+                    format!(
+                        "{}: clone already contains the requested reference; skip redundant fetch",
+                        dependency.name
+                    ),
+                );
+                git::checkout_commit(destination, &dependency.name, &commit, false)?;
+                return Ok(commit);
+            }
+        }
+
+        let reason = match repository {
+            git::RepositoryState::Cloned => "requested reference is missing from the clone",
+            git::RepositoryState::Initialized => {
+                "long-path checkout was initialized without objects"
+            }
+            git::RepositoryState::Existing if self.options.update.updates(&dependency.name) => {
+                "explicit update requires refreshed remote refs"
+            }
+            git::RepositoryState::Existing => {
+                "unlocked source selection requires refreshed remote refs"
+            }
+        };
+        (self.status)(
+            "Detail",
+            format!("{}: fetch required because {reason}", dependency.name),
+        );
+        (self.status)("Fetching", format!("{} ({url})", dependency.name));
+        git::fetch(destination, url)?;
+        if branch.is_none() && tag.is_none() && rev.is_none() {
+            git::refresh_default_branch(destination, url)?;
+        }
         let commit = git::resolve_reference(destination, &reference)?;
         git::checkout_commit(destination, &dependency.name, &commit, unborn)?;
         Ok(commit)

@@ -82,8 +82,8 @@ provenance, extracts a new versioned directory, checks the executable version an
 atomically switches a current-installation pointer. Previous installations remain
 available. Downloads require `curl` (`curl.exe` on Windows), and `gh` when
 published provenance must be verified. Missing host artifacts fail explicitly.
-The planned compatible release is `0.2.1-pre-beta`; verify its official artifact
-after publication. The older `0.2.0-pre-beta` is not a package-import substitute.
+The compatible public release is `0.2.1-pre-beta`; CI verifies its official
+artifacts against the pinned digests. The older `0.2.0-pre-beta` is not a package-import substitute.
 
 `VEX_TOOLCHAIN_HOME` selects the installation prefix (default:
 `$HOME/.vex/toolchains`, or `%LOCALAPPDATA%/.vex/toolchains` on Windows).
@@ -140,8 +140,11 @@ vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
 vex fetch [--locked] [--offline]
 vex update [<package>...]
 vex info
-vex tree [--locked] [--offline]
+vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]
 vex metadata [--format=json] [--locked] [--offline]
+vex doctor [--format=json] [--target <triple>]
+vex clean [--dry-run]
+vex prune [--apply] [--dry-run]
 vex setup wavec [--version <version>] [--script-fallback]
 vex --version
 ```
@@ -164,6 +167,23 @@ lock; run `vex fetch` first when the local graph or coordination state is missin
 `--locked` also enforces lockfile compatibility; metadata preserves v2/v3 bytes
 with or without that flag. `--offline` is accepted and is already the default.
 See [the metadata v1 contract](docs/metadata.md) for fields and ordering.
+
+`tree --invert <name>` explains which packages depend on a selected package;
+`--depth 0` prints only the displayed root. `doctor` inspects the installed tools
+and locally available project plan without network access or state repair. See
+[doctor JSON](docs/doctor.md) for its versioned machine-readable report.
+
+`clean` immediately removes unchanged Vex-owned build outputs; `clean --dry-run`
+previews. Existing untracked outputs and running generations are preserved.
+`prune` previews unused, verified Vex-owned Git checkouts and deletes them only
+with `--apply`; it needs a prepared local graph and never fetches for validation.
+Unknown, edited, dirty, and ignored files are preserved. Neither command recovers
+pending transactions or removes transaction backups. Reusing a deleted dependency
+may require `fetch` with network access. See [cleanup details](docs/reference.md#inspection-and-cleanup).
+
+Global `--quiet` (`-q`) hides Vex progress while retaining errors, results,
+compiler/program streams, and JSONL events. `-v` shows major decisions; `-vv`
+adds redacted diagnostic context. These options stop at `run --`.
 
 ## Project Layout
 
@@ -199,7 +219,7 @@ Vex uses `vex.ws` as the project manifest. The extension is `.ws`.
 ```
 
 The current root manifest object accepts only `format`, `name`, `version`, `lib`, `description`,
-`author`, `license`, and `dependencies`. Dependency objects accept only `name`,
+`author`, `license`, `compiler`, and `dependencies`. Dependency objects accept only `name`,
 `version`, `path`, `git`, `branch`, `tag`, and `rev`. Unknown fields are errors,
 including names intended as private or experimental extensions; adding a field
 requires an explicit Vex schema change.
@@ -436,7 +456,8 @@ sources or running Git outside Vex does not participate in this coordination.
 project protection **before spawning** the program/runner, and preserves its
 working directory, environment, stdio, and runtime arguments. Subsequent builds
 and updates cannot overwrite that run's output. Initial policy does not perform
-automatic run-generation GC. Transaction backups are also retained; preserve them
+automatic run-generation GC. Explicit `clean` skips live generations using an
+inherited OS lease and only removes recorded, unchanged artifacts. Transaction backups are also retained; preserve them
 when diagnosing failed recovery. No automatic deletion based on PID or age occurs.
 
 Vex is a Cargo workspace. The root package contains only the CLI surface;

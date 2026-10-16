@@ -62,6 +62,14 @@ fn run_build(
         compiler.validate_target(target)?;
     }
     compiler.validate_version(manifest.compiler.as_deref())?;
+    ui::verbose(format!(
+        "target: {}",
+        options.target.as_deref().unwrap_or("compiler host default")
+    ));
+    ui::verbose(format!("compiler: {}", compiler.path().display()));
+    ui::trace(format!(
+        "build options: {options:?}; compiler plan is queried for this invocation"
+    ));
     let default_input = resolve_default_input(manifest, mode)?;
 
     let mut global_args = Vec::new();
@@ -95,11 +103,20 @@ fn run_build(
         |candidate| compiler.validate_version(candidate.compiler.as_deref()),
     )?;
 
+    ui::verbose(format!(
+        "resolved {} dependencies",
+        resolution.package_count()
+    ));
+    let mut run_lease = None;
     let generation = if mode == BuildMode::Run {
         let path = if options.dry_run {
             PathBuf::from("target/.vex-run/planned")
         } else {
-            compiler::create_run_generation()?
+            let path = compiler::create_run_generation()?;
+            let root = std::env::current_dir().map_err(Error::environment)?;
+            run_lease =
+                Some(state::artifacts::RunLease::create(&root, &path).map_err(Error::environment)?);
+            path
         };
         build_args.push(format!("--target-dir={}", path.display()));
         Some(path)
@@ -112,6 +129,11 @@ fn run_build(
     wavec_args.push("build".to_string());
     wavec_args.extend(build_args);
 
+    ui::verbose(if options.dry_run {
+        "freshness: planning only; compiler will not execute"
+    } else {
+        "freshness: no build cache; compiling the current project"
+    });
     let package = format!("{} v{}", manifest.name, manifest.version);
     if options.dry_run {
         ui::status("Planning", &package);
@@ -145,6 +167,7 @@ fn run_build(
         outcome = Outcome::program(status);
     }
 
+    drop(run_lease);
     if !options.dry_run && outcome.code == 0 {
         ui::status(
             "Finished",
