@@ -140,6 +140,32 @@ def main():
             raise RuntimeError("metadata omitted the transitive graph")
         if (app / "vex.lock").read_bytes() != locked:
             raise RuntimeError("metadata changed vex.lock")
+        inverse = run([vex, "tree", "--invert", "leaf", "--locked", "--offline"], app, env)
+        if not all(name in inverse.stdout for name in ("leaf", "middle", "app")):
+            raise RuntimeError("inverse tree omitted the dependent path")
+        depth = run([vex, "tree", "--depth", "0", "--locked", "--offline"], app, env)
+        if len(depth.stdout.splitlines()) != 1:
+            raise RuntimeError("depth zero did not limit output to the root")
+        doctor = run([vex, "doctor", "--format=json"], app, env)
+        health = json.loads(doctor.stdout)
+        if health["schema_version"] != 1 or not health["success"] or not any(
+                check["id"] == "dry_run" and check["status"] == "ok" for check in health["checks"]):
+            raise RuntimeError("doctor did not verify the prepared compiler plan")
+        executable = app / artifacts[0]["executable"]
+        unknown = app / "target/user-file"
+        unknown.write_text("preserve me", encoding="utf-8")
+        preview = run([vex, "--quiet", "clean", "--dry-run"], app, env)
+        if not executable.is_file() or "Would remove" not in preview.stdout:
+            raise RuntimeError("clean preview changed or omitted generated artifacts")
+        run([vex, "clean"], app, env)
+        if executable.exists() or unknown.read_text(encoding="utf-8") != "preserve me":
+            raise RuntimeError("clean failed to distinguish owned output from user data")
+        quiet = run([vex, "--quiet", "run", "--locked", "--offline"], app, env)
+        if "42" not in quiet.stdout.splitlines() or "Compiling" in quiet.stderr or "Running" in quiet.stderr:
+            raise RuntimeError("quiet changed program output or retained Vex progress")
+        run([vex, "prune"], app, env)
+        if (app / "vex.lock").read_bytes() != locked:
+            raise RuntimeError("operational inspection or clean changed vex.lock")
         if args.reexports:
             (middle / "src/lib.wave").write_text('pub import("leaf")::{hidden};\n', encoding="utf-8")
             (app / "src/main.wave").write_text('import("middle")::{hidden};\nfun main() { var result: i32 = hidden(); println("{}", result); }\n', encoding="utf-8")
@@ -155,6 +181,20 @@ def main():
                 raise RuntimeError("private import failed for an unexpected reason")
             if (app / "vex.lock").read_bytes() != locked:
                 raise RuntimeError("private-symbol failure changed vex.lock")
+
+
+        # A removed Git dependency remains until explicit prune --apply.
+        (app / "vex.ws").write_text('{format=2,name="app",dependencies=[]}\n', encoding="utf-8")
+        run([vex, "fetch", "--offline"], app, env)
+        checkouts = list((app / ".vex/deps").iterdir())
+        if not checkouts:
+            raise RuntimeError("fetch implicitly removed unused dependency state")
+        preview = run([vex, "prune"], app, env)
+        if "Would remove" not in preview.stdout or not all(path.exists() for path in checkouts):
+            raise RuntimeError("prune did not preview retained unused checkouts")
+        run([vex, "prune", "--apply"], app, env)
+        if any(path.exists() for path in checkouts):
+            raise RuntimeError("prune did not remove the verified unused checkout")
 
 
 if __name__ == "__main__":

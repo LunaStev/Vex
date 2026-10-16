@@ -66,7 +66,8 @@ fn main() {
         checkpoint("PLAN");
         let mode = if args.iter().any(|a| a == "--run") { "build+run" } else { "build" };
         let schema = env::var("FAKE_SCHEMA").unwrap_or_else(|_| "1".into());
-        let output = generation.map(|p| p.join(if cfg!(windows) { "program.exe" } else { "program" }));
+        let output = generation.map(|p| p.join(if cfg!(windows) { "program.exe" } else { "program" }))
+            .or_else(|| env::var_os("FAKE_BUILD_OUTPUT").map(PathBuf::from));
         let (link, execute) = if let Some(output) = output {
             let output = env::var("FAKE_OUTPUT").unwrap_or_else(|_| output.to_string_lossy().into_owned());
             let link = format!("{{\"output\":{output:?},\"inputs\":[],\"program\":\"linker\",\"args\":[]}}");
@@ -74,12 +75,16 @@ fn main() {
             let execute = if let Ok(runner) = env::var("FAKE_RUNNER") {
                 format!("{{\"program\":{runner:?},\"args\":[{output:?}]}}")
             } else { format!("{{\"program\":{output:?},\"args\":{runtime:?}}}") };
-            (link, execute)
+            (link, if mode == "build+run" { execute } else { "null".into() })
         } else { ("null".into(), "null".into()) };
         println!("{{\"schema_version\":{schema},\"mode\":\"{mode}\",\"target\":\"test-target\",\"emit\":\"bin\",\"emit_kinds\":[],\"control_mode\":null,\"forced_input_type\":null,\"inputs\":[],\"emit_jobs\":[],\"compile\":[],\"link\":{link},\"execute\":{execute}}}");
     } else {
         assert!(!args.iter().any(|a| a == "--run" || a == "--"));
         checkpoint("COMPILE");
+        if let Some(output) = env::var_os("FAKE_BUILD_OUTPUT").map(PathBuf::from) {
+            fs::create_dir_all(output.parent().unwrap()).unwrap();
+            fs::write(output, b"compiled artifact").unwrap();
+        }
         if let Ok(code) = env::var("VEX_TEST_COMPILE_EXIT") { std::process::exit(code.parse().unwrap()); }
         if let Some(generation) = generation {
             fs::create_dir_all(&generation).unwrap();

@@ -34,3 +34,25 @@ fn local_git_url_normalizes_verbatim_unc_paths() {
         "file://server/share/vex%20fixture%231"
     );
 }
+
+#[test]
+fn git_trace_paths_use_native_absolute_spelling_without_url_encoding() {
+    use support::normalize_git_path;
+    for (input, expected) in [
+        (
+            r"\\?\C:\vex fixture#1\trace.jsonl",
+            "C:/vex fixture#1/trace.jsonl",
+        ),
+        (
+            r"\\?\UNC\server\share\trace.jsonl",
+            "//server/share/trace.jsonl",
+        ),
+        (r"C:\vex\trace.jsonl", "C:/vex/trace.jsonl"),
+    ] {
+        assert_eq!(normalize_git_path(input, true), expected);
+    }
+    assert_eq!(
+        normalize_git_path("/tmp/vex fixture#1/trace.jsonl", false),
+        "/tmp/vex fixture#1/trace.jsonl"
+    );
+}

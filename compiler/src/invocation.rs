@@ -116,24 +116,45 @@ pub fn run_build_with_dry_run(
         .filter(|a| a.as_str() != "--run")
         .cloned()
         .collect();
-    let status = if let Some(sink) = report.as_mut() {
-        insert_build_flag(&mut compile_args, "--error-format=json");
-        let output = process::output_without_deadline(Command::new(wavec).args(&compile_args))
-            .map_err(Error::environment)?;
-        diagnostic::output::stdout(format_args!("{}", String::from_utf8_lossy(&output.stdout)))?;
-        // Compiler diagnostics retain their original structured payload and spans.
-        // User-program streams never pass through this compiler-only capture.
-        diagnostic::output::stderr(format_args!("{}", String::from_utf8_lossy(&output.stderr)))?;
-        emit_diagnostics(&output.stderr, &mut **sink)?;
-        output.status
-    } else {
-        process::status(Command::new(wavec).args(&compile_args), None, false).map_err(|e| {
-            Error::environment(format!(
-                "failed to execute `{}` build: {e}",
-                wavec.display()
-            ))
-        })?
-    };
+    let outputs = plan["compile"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|job| job["output"].as_str())
+        .chain(plan["link"]["output"].as_str())
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let root = std::env::current_dir().map_err(Error::environment)?;
+    let ownership = state::artifacts::Batch::prepare(&root, outputs).map_err(Error::environment)?;
+    let compile_result = (|| -> Result<ExitStatus, Error> {
+        let status = if let Some(sink) = report.as_mut() {
+            insert_build_flag(&mut compile_args, "--error-format=json");
+            let output = process::output_without_deadline(Command::new(wavec).args(&compile_args))
+                .map_err(Error::environment)?;
+            diagnostic::output::stdout(format_args!(
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            ))?;
+            // Compiler diagnostics retain their original structured payload and spans.
+            // User-program streams never pass through this compiler-only capture.
+            diagnostic::output::stderr(format_args!(
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))?;
+            emit_diagnostics(&output.stderr, &mut **sink)?;
+            output.status
+        } else {
+            process::status(Command::new(wavec).args(&compile_args), None, false).map_err(|e| {
+                Error::environment(format!(
+                    "failed to execute `{}` build: {e}",
+                    wavec.display()
+                ))
+            })?
+        };
+        Ok(status)
+    })();
+    ownership.finish().map_err(Error::environment)?;
+    let status = compile_result?;
     if !status.success() {
         return Err(compiler_error(
             status,

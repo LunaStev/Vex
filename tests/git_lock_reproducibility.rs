@@ -71,7 +71,7 @@ fn git_lock_keeps_transitive_graph_until_explicit_update() {
         .is_dir());
     let first_stderr = String::from_utf8_lossy(&first_fetch.stderr);
     assert!(first_stderr.contains("Resolving"), "{first_stderr}");
-    assert!(first_stderr.contains("Fetching"), "{first_stderr}");
+    assert!(first_stderr.contains("Cloning"), "{first_stderr}");
     assert!(first_stderr.contains("Locking"), "{first_stderr}");
 
     let first_lock = read_lock(&app);

@@ -50,6 +50,16 @@ impl Selection {
         let root = manifest_path
             .parent()
             .ok_or_else(|| Error::environment("manifest has no parent directory"))?;
+        crate::ui::verbose(format!("project manifest: {}", manifest_path.display()));
+        crate::ui::trace(format!(
+            "project selection: {} from {}",
+            if self.manifest_path.is_some() {
+                "explicit manifest"
+            } else {
+                "nearest real-path ancestor"
+            },
+            start.display()
+        ));
         std::env::set_current_dir(root).map_err(Error::environment)?;
         Ok(Project {
             manifest_path,

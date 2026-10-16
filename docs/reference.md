@@ -65,7 +65,43 @@ and lockfile publication uses a recovery journal. Normal commands recover pendin
 publication; dry-run fails without recovering. Dry-run permits coordination files
 only, with no message file, checkout, lockfile migration or build output. Each run
 has its own output generation, and releases its build lease before spawning the
-program. There is no automatic generation/backup garbage collection.
+program. A separate inherited OS lease protects each run generation until the
+program and its children release their handles. There is no automatic
+generation/backup garbage collection.
+
+## Inspection and cleanup
+
+`tree --invert <name>` shows why a package is needed, walking dependents back to
+the project root. `--depth <n>` limits edges from the displayed root; zero prints
+only that root. The default is the complete dependency tree. These options use
+the usual resolution rules; use `--locked --offline` to prohibit lock changes
+and network access.
+
+`doctor` inspects Vex, Git, compiler selection/version/targets, project state,
+and available plan/linker tools without fetching or repairing. It also works
+outside a project. `--target <triple>` selects a target and `--format=json`
+returns [doctor schema v1](doctor.md). Missing local graph data requires an
+explicit `fetch` before project-plan inspection. Optional cross-linker gaps are
+warnings; required tool or protocol failures produce a nonzero exit.
+
+`clean` deletes only unchanged outputs whose creation Vex recorded; `--dry-run`
+previews without creating coordination or message files. It preserves sources,
+manifest/lockfiles, dependencies, legacy/untracked outputs, edited outputs,
+symlinks/reparse points, and running generations. Empty owned directories can
+be removed, but directories containing unknown files are retained. Ownership
+begins with builds made by this version; existing files are never adopted merely
+because a later compiler invocation writes the same path. Run lease files remain
+as coordination identities, even after their generation is removed.
+
+`prune` previews unused Git checkouts; `--apply` performs deletion. A complete
+current local graph and existing project coordination are required; run `fetch`
+when they are missing or stale. Validation never fetches implicitly. Only newly
+published checkouts with an intact ownership record are eligible. Dirty,
+untracked, ignored, modified Git metadata, legacy/unrecorded checkouts, and
+unknown files are preserved. Both cleanup commands refuse pending recovery;
+use a normal `fetch` to recover first. Transaction backups and compiler
+installations are outside cleanup scope. No shared dependency cache exists, so
+reusing a pruned dependency may require network access through `fetch`.
 
 ## Environment
 
@@ -85,10 +121,17 @@ such as `VEX_RELEASE_HOST` belong to `x.py`, not normal Vex commands.
 
 ## Streams and outcomes
 
-Help, version, info, tree, metadata and requested dry-run data use stdout. Status,
+Help, version, info, tree, metadata, doctor, prune reports and requested dry-run
+data use stdout. Status,
 warnings and errors use stderr. User program stdin/stdout/stderr and TTY are
 inherited. Raw wavec flags are not Vex flags; `run -- <args...>` passes native
 arguments directly to the program.
+
+Global `-q` / `--quiet` suppresses Vex progress only. Results, warnings, errors,
+compiler/program streams and message-file events remain available. `-v` /
+`--verbose` adds major selection decisions; `-vv` adds diagnostic context and
+reasons. Verbosity is capped at two and conflicts with quiet. All Vex diagnostic
+text is credential-redacted. Options after `run --` belong to the program.
 
 | Outcome | Exit code |
 | --- | --- |
@@ -108,7 +151,8 @@ JSONL exclusively to a new file, never mixed into stdout. Failure before program
 start stops Vex; reporting failure after program start warns and preserves the
 program exit. Missing final events mean an incomplete report.
 
-Machine-readable schemas: [metadata](schemas/metadata-v1.json) and
+Machine-readable schemas: [metadata](schemas/metadata-v1.json),
+[doctor](schemas/doctor-v1.json) and
 [message events](schemas/messages-v1.json). Additive fields are permitted; changed
 existing meanings require a new schema version. There is no registry or publish
 command in this release.

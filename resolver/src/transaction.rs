@@ -396,6 +396,10 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
             let entry = entry.map_err(err)?;
             copy_tree(&entry.path(), &to.join(entry.file_name()))?;
         }
+        // Preserve user directory permissions as well as file contents. Set
+        // them after copying children so restrictive modes do not interrupt
+        // construction of the unpublished candidate.
+        fs::set_permissions(to, meta.permissions()).map_err(err)?;
     } else if meta.is_file() {
         fs::copy(from, to).map_err(err)?;
     } else {
