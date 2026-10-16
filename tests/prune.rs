@@ -327,10 +327,10 @@ fn prune_output_redacts_known_credentials_from_preserved_paths() {
     )
     .unwrap();
     success(
-        &Command::new(env!("CARGO_BIN_EXE_vex"))
+        &foreground(Command::new(env!("CARGO_BIN_EXE_vex")))
             .current_dir(&fixture.app)
             .arg("fetch")
-            .env("GIT_CONFIG_GLOBAL", config)
+            .env("GIT_CONFIG_GLOBAL", git_path(&config))
             .output()
             .unwrap(),
     );
