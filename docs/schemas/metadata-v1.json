@@ -93,6 +93,33 @@
               ]
             }
           }
+        },
+        "native": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "output": {
+              "enum": [
+                "object",
+                "shared",
+                null
+              ]
+            },
+            "libraries": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "search_paths": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
         }
       }
     }
