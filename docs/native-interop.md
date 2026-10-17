@@ -93,6 +93,22 @@ native inputs but cannot set a library output kind. `vex run` still rejects
 library packages. `vex check` performs Wave checking without linking native
 inputs or producing native artifacts; it still validates their selected paths.
 
+Windows DLLs also require an explicit list of exported C symbols:
+
+```wson
+native = { output = "shared", exports = ["wave_add"] }
+```
+
+Public Wave `0.2.1-pre-beta` emits C ABI symbols for `export(c)` but does not
+automatically add them to the DLL export table. Vex passes the root package's
+`exports` to the Windows linker, which rejects undefined symbols. Entries must
+be unique ASCII C identifiers; aliases, ordinals, and linker options are not
+accepted. The source still needs `export(c)` (or its explicit symbol form).
+`exports` is allowed only with `output = "shared"` and must be nonempty for
+Windows shared builds. On ELF/Mach-O it is retained in metadata but does not
+restrict symbol visibility. Dependency export lists are not merged into the
+root DLL; list every intended public C symbol in the root package.
+
 On Linux, a C caller can declare `int32_t wave_add(int32_t, int32_t);` and link the
 produced object with its C compiler. C++ callers use `extern "C"`; Rust callers
 use an `extern "C"` declaration and appropriate native linking. Keep the C

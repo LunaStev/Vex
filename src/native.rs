@@ -18,6 +18,7 @@ pub fn configuration(manifest: &Manifest) -> Value {
         None => Value::Null,
         Some(config) => json!({
             "output":config.output.map(NativeOutput::as_str),
+            "exports":config.exports,
             "libraries":config.libraries.iter().map(|lib| json!({"path":lib.path,"name":lib.name,"target":lib.target})).collect::<Vec<_>>(),
             "search_paths":config.search_paths.iter().map(|path| json!({"path":path.path,"target":path.target})).collect::<Vec<_>>()
         }),
@@ -276,7 +277,19 @@ pub fn prepare(
                 .extend(["-C".into(), "relocation-model=pic".into()]);
             // wavec links through temporary files. Give the final library a
             // stable loader identity instead of embedding that temporary path.
-            if os == "macos" {
+            if os == "windows" {
+                let exports = &root.native.as_ref().unwrap().exports;
+                if exports.is_empty() {
+                    return Err(Error::resolution(
+                        "Windows shared libraries require a nonempty `native.exports` list of C symbols declared with `export(c)`",
+                    ));
+                }
+                build.global.extend(
+                    exports
+                        .iter()
+                        .map(|name| format!("-Clink-arg=/EXPORT:{name}")),
+                );
+            } else if os == "macos" {
                 build.global.extend([
                     "-Clink-arg=-install_name".into(),
                     format!("-Clink-arg=@rpath/lib{}.dylib", root.name),

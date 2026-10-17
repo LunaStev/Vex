@@ -261,7 +261,12 @@ fn explicit_targets_choose_windows_and_macos_library_names() {
         ("x86_64-pc-windows-msvc", "shared", "app.dll"),
         ("aarch64-apple-darwin", "shared", "libapp.dylib"),
     ] {
-        let f = Fixture::new(true, &format!(",native={{output=\"{native}\"}}"));
+        let exports = if native == "shared" {
+            ",exports=[\"wave_add\"]"
+        } else {
+            ""
+        };
+        let f = Fixture::new(true, &format!(",native={{output=\"{native}\"{exports}}}"));
         let value = plan(&f.run(&["build", "--target", target, "--dry-run"]));
         let output = if native == "object" {
             &value["compile"][0]["output"]
@@ -271,6 +276,36 @@ fn explicit_targets_choose_windows_and_macos_library_names() {
         assert_eq!(output, &json!(format!("target/{target}/dev/{filename}")));
         assert_eq!(value["target"], target);
         assert!(!f.project.join("target").exists());
+    }
+}
+
+#[test]
+fn windows_shared_requires_explicit_exports_and_keeps_them_in_metadata() {
+    for target in ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"] {
+        let f = Fixture::new(true, ",native={output=\"shared\"}");
+        code(&f.run(&["fetch", "--offline"]), 0);
+        let before = snapshot(&f.project);
+        let result = f.run(&["build", "--target", target, "--dry-run"]);
+        code(&result, 3);
+        assert!(String::from_utf8_lossy(&result.stderr).contains("native.exports"));
+        assert_eq!(snapshot(&f.project), before);
+        assert!(!f.project.join("compiler-started").exists());
+
+        f.package(
+            "app",
+            true,
+            ",native={output=\"shared\",exports=[\"wave_add\",\"_other2\"]}",
+            "",
+        );
+        let value = plan(&f.run(&["build", "--target", target, "--dry-run"]));
+        let args = value["link"]["args"].as_array().unwrap();
+        assert!(args.contains(&json!("/EXPORT:wave_add")));
+        assert!(args.contains(&json!("/EXPORT:_other2")));
+        let value = plan(&f.run(&["metadata", "--offline"]));
+        assert_eq!(
+            value["root"]["native"]["exports"],
+            json!(["wave_add", "_other2"])
+        );
     }
 }
 
@@ -464,7 +499,7 @@ fn metadata_reports_native_declarations_without_loading_compiler_or_inputs() {
     assert_eq!(value["root"]["native"]["libraries"][0]["name"], "rootlib");
     assert_eq!(
         value["packages"][0]["native"],
-        json!({"output":"shared","libraries":[{"path":"missing.a","name":null,"target":"aarch64-apple-darwin"}],"search_paths":[{"path":"missing","target":"aarch64-apple-darwin"}]})
+        json!({"output":"shared","exports":[],"libraries":[{"path":"missing.a","name":null,"target":"aarch64-apple-darwin"}],"search_paths":[{"path":"missing","target":"aarch64-apple-darwin"}]})
     );
     assert_eq!(snapshot(&f.project), before);
     assert!(f.invocations().is_empty());

@@ -8,6 +8,7 @@ use crate::parse::reject_unknown_fields;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeConfig {
     pub output: Option<NativeOutput>,
+    pub exports: Vec<String>,
     pub libraries: Vec<NativeLibrary>,
     pub search_paths: Vec<NativeSearchPath>,
 }
@@ -47,7 +48,11 @@ pub(crate) fn parse(value: Option<&WsonValue>, lib: bool) -> Result<Option<Nativ
     let WsonValue::Object(object) = value else {
         return Err("manifest field `native` must be an object".into());
     };
-    reject_unknown_fields(object, &["output", "libraries", "search_paths"], "native")?;
+    reject_unknown_fields(
+        object,
+        &["output", "exports", "libraries", "search_paths"],
+        "native",
+    )?;
     let output = match optional_string(object, "output", "native")? {
         None => None,
         Some(_) if !lib => return Err("native field `output` requires `lib = true`".into()),
@@ -57,6 +62,29 @@ pub(crate) fn parse(value: Option<&WsonValue>, lib: bool) -> Result<Option<Nativ
             _ => return Err("native field `output` must be `object` or `shared`".into()),
         },
     };
+
+    let mut exports = Vec::new();
+    let mut export_names = HashSet::new();
+    if object.contains_key("exports") && output != Some(NativeOutput::Shared) {
+        return Err("native field `exports` requires `output = \"shared\"`".into());
+    }
+    for value in array(object, "exports")? {
+        let WsonValue::String(symbol) = value else {
+            return Err("native export must be a C symbol string".into());
+        };
+        let mut bytes = symbol.bytes();
+        if !bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err("native export must be an ASCII C identifier".into());
+        }
+        if !export_names.insert(symbol.clone()) {
+            return Err("native export is declared more than once".into());
+        }
+        exports.push(symbol.clone());
+    }
 
     let mut libraries = Vec::new();
     let mut library_keys = HashSet::new();
@@ -107,6 +135,7 @@ pub(crate) fn parse(value: Option<&WsonValue>, lib: bool) -> Result<Option<Nativ
     }
     Ok(Some(NativeConfig {
         output,
+        exports,
         libraries,
         search_paths,
     }))
@@ -264,6 +293,39 @@ mod tests {
                     .native,
                 None
             );
+        }
+    }
+
+    #[test]
+    fn shared_exports_accept_only_unique_c_symbols() {
+        let config = manifest(r#"{output="shared",exports=["wave_add","_value2"]}"#, true)
+            .unwrap()
+            .native
+            .unwrap();
+        assert_eq!(config.exports, ["wave_add", "_value2"]);
+        for raw in [
+            r#"{exports=[]}"#,
+            r#"{output="object",exports=["wave_add"]}"#,
+            r#"{output="shared",exports="wave_add"}"#,
+            r#"{output="shared",exports=[1]}"#,
+            r#"{output="shared",exports=["wave_add","wave_add"]}"#,
+            r#"{output="shared",exports=[],exports=[]}"#,
+        ] {
+            assert!(manifest(raw, true).is_err(), "accepted {raw}");
+        }
+        for symbol in [
+            "",
+            "1name",
+            "name=other",
+            "name,@1",
+            "/EXPORT:name",
+            "-flag",
+            "x y",
+            "x\n",
+            "café",
+        ] {
+            let raw = format!("{{output=\"shared\",exports=[{}]}}", wson::quote(symbol));
+            assert!(manifest(&raw, true).is_err(), "accepted {symbol:?}");
         }
     }
 

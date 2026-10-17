@@ -256,7 +256,8 @@ def outbound(vex, root, tools, spec):
     if obj.exists() or unknown.read_text(encoding="utf-8") != "preserve me":
         raise RuntimeError("clean failed to distinguish native output from user data")
 
-    package(project, "wave_exports", lib=True, native=dict(output="shared"))
+    package(project, "wave_exports", lib=True,
+            native=dict(output="shared", exports=["wave_add"]))
     outputs = build(vex, project, tools.env, root / "outbound-shared.jsonl")
     name = {"coff": "wave_exports.dll", "macho": "libwave_exports.dylib",
             "elf": "libwave_exports.so"}[spec["object_format"]]
@@ -268,6 +269,23 @@ def outbound(vex, root, tools, spec):
     consumer = root / "shared consumer"
     consumer.mkdir()
     tools.consume(consumer, library, shared=True)
+    if tools.windows:
+        # A nonexistent export must fail linking rather than publish an empty
+        # import library or replace the previously usable DLL/import pair.
+        previous = {path: path.read_bytes()
+                    for path in (library, library.with_suffix(".lib"))}
+        package(project, "wave_exports", lib=True,
+                native=dict(output="shared", exports=["missing_export"]))
+        report = root / "outbound-failure.jsonl"
+        failed = run([vex, "--message-file", report, "build", "--locked", "--offline"],
+                     project, tools.env, expected=4)
+        outcome = events(report)[-1]
+        if ("missing_export" not in failed.stderr or outcome.get("origin") != "vex"
+                or outcome.get("exit_code") != 4
+                or any(path.read_bytes() != content for path, content in previous.items())):
+            raise RuntimeError("undefined DLL export lost its error or previous library pair")
+        package(project, "wave_exports", lib=True,
+                native=dict(output="shared", exports=["wave_add"]))
     run([vex, "clean", "--dry-run"], project, tools.env)
     if not all(path.is_file() for path in outputs):
         raise RuntimeError("clean preview removed a shared output")
