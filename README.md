@@ -134,14 +134,14 @@ application example.
 
 ```sh
 vex init [--lib]
-vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
-vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]
-vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
+vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
+vex run [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]
+vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
 vex fetch [--locked] [--offline]
 vex update [<package>...]
 vex info
 vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]
-vex metadata [--format=json] [--locked] [--offline]
+vex metadata [--format=json] [--format-version <1|2>] [--locked] [--offline]
 vex doctor [--format=json] [--target <triple>]
 vex clean [--dry-run]
 vex prune [--apply] [--dry-run]
@@ -166,7 +166,9 @@ fetching, migrating or repairing project state. It uses an existing shared state
 lock; run `vex fetch` first when the local graph or coordination state is missing.
 `--locked` also enforces lockfile compatibility; metadata preserves v2/v3 bytes
 with or without that flag. `--offline` is accepted and is already the default.
-See [the metadata v1 contract](docs/metadata.md) for fields and ordering.
+The default schema remains 1 for single-target packages; mixed or multiple targets
+require `--format-version 2`. See [metadata schemas](docs/metadata.md) for fields
+and ordering.
 
 `tree --invert <name>` explains which packages depend on a selected package;
 `--depth 0` prints only the displayed root. `doctor` inspects the installed tools
@@ -218,13 +220,17 @@ Vex uses `vex.ws` as the project manifest. The extension is `.ws`.
 }
 ```
 
-The current root manifest object accepts only `format`, `name`, `version`, `lib`, `description`,
-`author`, `license`, `compiler`, and `dependencies`. Dependency objects accept only `name`,
+Formats 1 and 2 accept `format`, `name`, `version`, `lib`, `description`,
+`author`, `license`, `compiler`, `native`, and `dependencies`. Format 3 replaces
+root `lib` with explicit `targets`, and additionally accepts `default_run`,
+`profiles`, `build`, and `target_config`. Dependency objects accept only `name`,
 `version`, `path`, `git`, `branch`, `tag`, and `rev`. Unknown fields are errors,
 including names intended as private or experimental extensions; adding a field
 requires an explicit Vex schema change.
 
-New manifests use `format = 2`: quoted strings decode JSON escapes (`\\`,
+Generated single-target manifests use `format = 2`; format 3 adds the explicit
+[target/profile model](docs/targets-and-profiles.md) with the same string rules.
+In formats 2 and 3, quoted strings decode JSON escapes (`\\`,
 `\"`, `\n`, `\r`, `\t`, and Unicode escapes). Strings can contain URLs, commas,
 comment markers, quotes, and Unicode without becoming WSON syntax. Comments are
 recognized only outside strings; duplicate fields are errors with source locations.
@@ -270,8 +276,9 @@ files, even if its HEAD matches `vex.lock`. If this happens, preserve your
 changes outside the managed checkout, restore that checkout yourself, and rerun
 `vex fetch`. Vex will not discard local changes automatically.
 
-Every dependency is a library package: its manifest must set `lib = true` and
-its canonical entry is `src/lib.wave`. Wave source imports the package name,
+Every dependency must provide a library: its manifest sets `lib = true` in
+formats 1/2, or declares `targets.lib` in format 3. The canonical library entry
+is `src/lib.wave`; any binaries declared by that dependency are not built. Wave source imports the package name,
 not the entry filename:
 
 ```wave
@@ -390,6 +397,19 @@ Non-UTF-8 program arguments work on supported OS interfaces; a dry-run JSON plan
 cannot represent them and fails explicitly. Compiler input/dependency paths
 that the JSON/WSON protocols cannot represent also fail instead of being replaced.
 
+Format 3 supports one library and several explicitly named binaries in a package.
+`build`/`check` default to all root targets; use `--lib` and repeatable `--bin <name>`
+to select them. `run` selects `--bin`, `default_run`, or the only binary, and reports
+ambiguity otherwise. Root `dev`/`release` and custom profiles select optimization
+levels 0–3. `--release` aliases `--profile release` and conflicts with `--profile`.
+
+All regular/native outputs now use `target/<compiler-triple>/<profile>/bin/` and
+`lib/`, with separate intermediate directories. Existing files at old paths stay
+in place. Exact-triple settings can select a root-owned sysroot/linker and explicit
+binary platform mode/entry/startup/linker script. Unsupported combinations fail
+before compilation. See [targets, profiles, and artifacts](docs/targets-and-profiles.md)
+for the manifest and selection contracts.
+
 Build progress is written to stderr with Cargo-style stages such as `Resolving`, `Fetching`, `Compiling`, `Checking`, `Running`, and `Finished`. Program output remains on stdout.
 
 Examples:
@@ -436,8 +456,9 @@ make a command read-only. Help and info do not create coordination state.
 
 Dry-run uses shared protection and may create only `.vex/` and its coordination
 file. It never fetches, repairs dependencies, creates target output, or rewrites
-the lockfile. Its single compiler planning call returns validated JSON on stdout;
-this diagnostic compiler plan is separate from the versioned `vex metadata` API.
+the lockfile. One planner call per selected target produces a single versioned
+Vex build-plan JSON envelope on stdout, including each validated compiler plan;
+this is separate from the read-only `vex metadata` API.
 
 Git candidates are staged and fully validated before publication. Existing
 checkouts and backup/recovery records remain under `.vex/`; lockfile replacement

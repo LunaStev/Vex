@@ -8,13 +8,15 @@ directory and its ancestors. An explicitly missing or invalid manifest is an err
 Doctor reports:
 
 - Vex version, host OS/architecture, executable path and invocation directory.
-- The selected compiler path/version, supported targets and requested target.
+- The selected compiler path/version, supported targets and effective target
+  (`--target`, then project `build.target`, then the compiler default).
   `VEX_WAVEC` is authoritative, including when its value is invalid. Relative
   compiler paths and PATH entries are interpreted from the invocation directory.
 - Git's executable path and version.
-- An available project's manifest, canonical input and exact compiler requirement.
-- Whether the existing dependency graph permits checking a compiler dry-run plan.
-- The planned linker's path and execute permission when the plan requires linking.
+- An available project's manifest, declared target entries and exact compiler requirement.
+- Whether the existing dependency graph permits checking every root target
+  with the root's effective `dev` optimization level.
+- Each planned linker's path and execute permission when its plan requires linking.
 
 Doctor does not install tools, fetch dependencies, create temporary projects,
 create coordination files, update lockfiles or checkouts, recover transactions,
@@ -23,7 +25,12 @@ requests and, when possible, `wavec build --dry-run`. They use the existing boun
 noninteractive subprocess supervision. No target linker is executed.
 
 Project planning uses the existing graph under a read-only shared project lease.
-The lease remains held while the compiler reads dependency sources. Missing
+The lease remains held while the compiler reads dependency sources for every
+declared target. Entry paths for all targets are checked before planning begins;
+a missing secondary binary cannot be hidden by a valid library. Binary plans
+include the package's own library import when present. Planner calls use the same
+output layout and platform settings as a dev build, without executing compilation
+or modifying artifact ownership. Missing
 coordination or dependencies, an inconsistent local graph, or pending recovery
 produces a warning and an explicit `not_checked` dry-run result. Doctor preserves
 that state; run `vex fetch` explicitly to prepare or recover the project. Outside a
@@ -62,7 +69,7 @@ The machine-readable contract is [doctor-v1.json](schemas/doctor-v1.json).
 | --- | --- |
 | `schema_version` | Integer `1`; consumers must check it |
 | `success` | No required check failed; not a claim that unchecked checks passed |
-| `checks` | Ordered diagnostic records; consumers should select by `id` |
+| `checks` | Ordered diagnostic records; consumers should select by `id` and target details |
 | `checks[].id` | Check name, such as `wavec`, `capabilities`, `local_graph` or `dry_run` |
 | `checks[].status` | `ok`, `warning`, `error` or `not_checked` |
 | `checks[].required` | Whether this result is part of required environment validation |
@@ -75,3 +82,11 @@ within schema v1. Consumers should ignore unknown fields and check IDs; changes 
 existing field types or meanings require a new schema version. Object-key order is
 not a contract. Paths are absolute native paths where they identify tools or the
 selected manifest. Target strings are the compiler's capability names.
+
+
+For mixed/multiple-target projects, `dry_run` and `linker` IDs repeat once per
+planned target. Successful `dry_run` details add `package_target: {name, kind}`,
+`profile: "dev"`, and effective `opt_level`. Linker details identify the package
+target too. These are additive schema-1 fields. The report does not select a run
+default or execute its program. CLI/compiler target selection remains separate
+from a package's binary/library target name.

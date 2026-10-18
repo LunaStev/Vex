@@ -97,8 +97,8 @@ inherited access controls apply on Windows. Report paths are user-selected.
 `--message-file` combined with `--dry-run` validates the destination but creates
 no report. An existing destination (including a dangling symlink) or missing parent
 is an environment error, just as for an ordinary report. Dry-run still permits
-coordination files only, with no recovery or migration. Existing dry-run plan
-output on stdout remains unchanged. Flags after the run argument separator `--`
+coordination files only, with no recovery or migration. Dry-run stdout is a versioned Vex build-plan envelope containing the selected
+package targets and their compiler plans; see [the build contract](targets-and-profiles.md). Flags after the run argument separator `--`
 are program arguments and do not change Vex reporting behavior.
 
 If opening/writing the report fails before runtime starts, stop further work
@@ -138,3 +138,9 @@ run executable before the program starts. Vex diagnostic events include structur
 context fields and cause chains. Neither human messages nor localized compiler text
 is reparsed to assign an exit category. Report writes still stop work before runtime
 starts and never replace an already executed program's exit status.
+
+
+Artifact events retain schema 1 and add `package_target: {name, kind}`, `profile`,
+and `artifact_kind`, allowing consumers to distinguish a library and binary with
+the same name. `kind` is `library` or `binary`; profile is the selected profile
+name. These fields do not replace the compiler target triple or emit kind.

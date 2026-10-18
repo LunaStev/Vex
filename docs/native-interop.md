@@ -89,8 +89,7 @@ export(c) fun wave_add(a: i32, b: i32) -> i32 { return a + b; }
 Use `output = "shared"` for a shared library. Both values require `lib = true`.
 A library without an explicit output setting now builds an object instead of
 attempting to link an executable without `main`. A binary package can declare
-native inputs but cannot set a library output kind. `vex run` still rejects
-library packages. `vex check` performs Wave checking without linking native
+native inputs but cannot set a library output kind. `vex run` selects a binary and rejects a library-only package. `vex check` performs Wave checking without linking native
 inputs or producing native artifacts; it still validates their selected paths.
 
 Windows DLLs also require an explicit list of exported C symbols:
@@ -119,26 +118,30 @@ Exceptions or Rust panics must not unwind through an incompatible ABI boundary.
 
 ## Artifacts and reproducibility
 
-Library packages and binary packages using native declarations (including
-transitive declarations) use:
+All package targets, including legacy manifests and binaries without native
+inputs, use:
 
-- `target/<compiler-triple>/dev/` or `target/<compiler-triple>/release/`
-- `<package>.o` (`.obj` on Windows) for objects
+- `target/<compiler-triple>/<profile>/bin/` for named binaries
+- `target/<compiler-triple>/<profile>/lib/` for library artifacts and companions
+- `<package>.o` (`.obj` on Windows) for object libraries
 - `lib<package>.so`, `lib<package>.dylib`, or `<package>.dll` for shared libraries
-- `<package>` (`.exe` on Windows) for native binaries
-- `.vex-obj/<package>/` below that directory for intermediate objects
+- `<binary-name>` (`.exe` on Windows, `.wasm` for Wasm) for binaries
+- `.vex-obj/<kind>/<name>/<output-kind>/` for intermediate objects
 
-Run outputs remain in a per-run generation; its lease protects them while the
-program executes. Binary projects with no native declarations retain their
-existing layout. This is the native slice of the broader targets/layout design;
-multiple named package targets and custom profiles are not introduced.
+Run outputs remain under a per-run generation; its lease protects them while the
+program executes. Old outputs are not moved or removed automatically. Format 3
+supports a library together with explicit named binaries and profiles; library
+output/exports move to `targets.lib`, while native inputs stay in root `native`.
+For example, `targets = { lib = { output = "shared", exports = ["wave_add"] } }`.
+See [the unified target model](targets-and-profiles.md) for selection and settings.
 
 ELF shared libraries receive a stable SONAME; Mach-O shared libraries receive an
 `@rpath` install name. Windows import libraries and other compiler-generated
 companions are preserved and tracked when produced. `--message-file` artifact
 events report paths only after successful output verification. Metadata schema 1
-adds a nullable `native` declaration object for each package without querying a
-compiler. Consumers must continue to tolerate additive fields.
+retains nullable `native` input declarations for single-target packages without
+querying a compiler. Schema 2 adds each target's output/exports and platform settings
+and supports mixed/multiple targets. Consumers must continue to tolerate additive fields.
 
 Builds refuse overwriting unowned or edited artifact files, including implicit
 Windows companions. Move such files aside explicitly before rebuilding. `clean`

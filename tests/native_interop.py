@@ -201,7 +201,8 @@ def inbound(vex, root, tools, spec):
     run([vex, "fetch", "--offline"], app, tools.env)
     locked = (app / "vex.lock").read_bytes()
     before = snapshot(app)
-    plan = json.loads(run([vex, "build", "--dry-run", "--locked", "--offline"], app, tools.env).stdout)
+    build_plan = json.loads(run([vex, "build", "--dry-run", "--locked", "--offline"], app, tools.env).stdout)
+    plan = build_plan["plans"][0]["compiler_plan"]
     if snapshot(app) != before or plan["target"] != spec["triple"]:
         raise RuntimeError("native dry-run mutated the project or selected the wrong target")
     outputs = build(vex, app, tools.env, root / "inbound-build.jsonl")
@@ -242,7 +243,7 @@ def outbound(vex, root, tools, spec):
     (project / "src/lib.wave").write_text(
         'export(c) fun wave_add(a: i32, b: i32) -> i32 { return a + b; }\n', encoding="utf-8")
     run([vex, "fetch", "--offline"], project, tools.env)
-    output_dir = project / "target" / spec["triple"] / "dev"
+    output_dir = project / "target" / spec["triple"] / "dev" / "lib"
     obj = output_dir / ("wave_exports" + tools.object_extension)
     outputs = build(vex, project, tools.env, root / "outbound-object.jsonl")
     if obj not in outputs:
@@ -292,6 +293,37 @@ def outbound(vex, root, tools, spec):
     run([vex, "clean"], project, tools.env)
     if any(path.exists() for path in outputs) or unknown.read_text(encoding="utf-8") != "preserve me":
         raise RuntimeError("clean did not remove the owned shared artifact set safely")
+
+
+def format_three_exports(vex, root, tools, spec):
+    """The explicit library model retains the real C ABI on every CI host."""
+    project = root / "format three exports"
+    (project / "src").mkdir(parents=True)
+    (project / "src/lib.wave").write_text(
+        'export(c) fun wave_add(a: i32, b: i32) -> i32 { return a + b; }\n', encoding="utf-8")
+    for kind in ("object", "shared"):
+        library = dict(output=kind)
+        if kind == "shared":
+            library["exports"] = ["wave_add"]
+        manifest = dict(format=3, name="fmt3_exports", targets=dict(lib=library))
+        (project / "vex.ws").write_text(wson(manifest) + "\n", encoding="utf-8")
+        if kind == "object":
+            run([vex, "fetch", "--offline"], project, tools.env)
+            locked = (project / "vex.lock").read_bytes()
+        outputs = build(vex, project, tools.env, root / ("fmt3-" + kind + ".jsonl"))
+        name = ("fmt3_exports" + tools.object_extension if kind == "object" else
+                {"coff": "fmt3_exports.dll", "macho": "libfmt3_exports.dylib",
+                 "elf": "libfmt3_exports.so"}[spec["object_format"]])
+        artifact = project / "target" / spec["triple"] / "dev" / "lib" / name
+        if artifact not in outputs:
+            raise RuntimeError("format 3 library artifact escaped the unified lib directory")
+        if tools.windows and kind == "shared" and artifact.with_suffix(".lib") not in outputs:
+            raise RuntimeError("format 3 shared artifact omitted its Windows import library")
+        consumer = root / ("format three " + kind + " consumer")
+        consumer.mkdir()
+        tools.consume(consumer, artifact, shared=kind == "shared")
+        if (project / "vex.lock").read_bytes() != locked:
+            raise RuntimeError("format 3 native output selection changed vex.lock")
 
 
 def archive_order(vex, root, tools):
@@ -345,7 +377,8 @@ def main():
         inbound(vex, root, tools, spec)
         archive_order(vex, root, tools)
         outbound(vex, root, tools, spec)
-        print("Native C/C++/Rust inputs and Wave object/shared consumers passed.", flush=True)
+        format_three_exports(vex, root, tools, spec)
+        print("Native C/C++/Rust inputs and legacy/format 3 Wave object/shared consumers passed.", flush=True)
 
 
 if __name__ == "__main__":

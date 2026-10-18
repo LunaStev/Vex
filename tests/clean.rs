@@ -59,10 +59,19 @@ impl Fixture {
         );
         output
     }
-    fn build(&self, output: &str, fail: bool) {
+    fn select_binary(&self, name: &str) {
+        fs::write(self.root.join("vex.ws"), format!(
+            "{{format=3,name=\"app\",version=0.1.0,targets={{bins=[{{name=\"{name}\",path=\"src/main.wave\"}}]}}}}"
+        )).unwrap();
+    }
+    fn build(&self, name: &str, fail: bool) {
+        self.build_profile(name, "dev", fail);
+    }
+    fn build_profile(&self, name: &str, profile: &str, fail: bool) {
+        self.select_binary(name);
         let result = self
-            .command(&["build"])
-            .env("FAKE_BUILD_OUTPUT", output)
+            .command(&["build", "--profile", profile])
+            .env("FAKE_BUILD_OUTPUT", artifact_profile(name, profile))
             .env("VEX_TEST_COMPILE_EXIT", if fail { "1" } else { "0" })
             .output()
             .unwrap();
@@ -87,12 +96,27 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
-fn program() -> &'static str {
+fn target() -> &'static str {
     if cfg!(windows) {
-        "program.exe"
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_os = "macos") {
+        "x86_64-apple-darwin"
     } else {
-        "program"
+        "x86_64-unknown-linux-gnu"
     }
+}
+fn artifact_profile(name: &str, profile: &str) -> String {
+    format!(
+        "target/{}/{profile}/bin/{name}{}",
+        target(),
+        std::env::consts::EXE_SUFFIX
+    )
+}
+fn artifact(name: &str) -> String {
+    artifact_profile(name, "dev")
+}
+fn program() -> String {
+    artifact("app").strip_prefix("target/").unwrap().to_owned()
 }
 
 #[test]
@@ -113,20 +137,20 @@ fn pristine_and_legacy_outputs_are_preserved_without_creating_state() {
 #[test]
 fn removes_only_new_unchanged_outputs_and_dry_run_preserves_everything() {
     let f = Fixture::new();
-    f.build("target/owned.o", false);
+    f.build("owned", false);
     let registry = fs::read(f.root.join(".vex/artifacts.json")).unwrap();
     let lock = fs::read(f.root.join("vex.lock")).unwrap();
     fs::write(f.root.join("target/unknown"), "keep").unwrap();
     let preview = f.ok(&["--message-file", "preview.jsonl", "clean", "--dry-run"]);
-    assert!(String::from_utf8_lossy(&preview.stdout).contains("target/owned.o"));
+    assert!(String::from_utf8_lossy(&preview.stdout).contains(&artifact("owned")));
     assert!(!f.root.join("preview.jsonl").exists());
-    assert!(f.root.join("target/owned.o").exists());
+    assert!(f.root.join(artifact("owned")).exists());
     assert_eq!(
         fs::read(f.root.join(".vex/artifacts.json")).unwrap(),
         registry
     );
     f.ok(&["clean"]);
-    assert!(!f.root.join("target/owned.o").exists());
+    assert!(!f.root.join(artifact("owned")).exists());
     assert_eq!(fs::read(f.root.join("target/unknown")).unwrap(), b"keep");
     assert_eq!(fs::read(f.root.join("vex.lock")).unwrap(), lock);
     assert!(f.root.join("src/main.wave").exists());
@@ -136,30 +160,31 @@ fn removes_only_new_unchanged_outputs_and_dry_run_preserves_everything() {
 #[test]
 fn modified_and_preexisting_outputs_are_preserved_before_compilation() {
     let f = Fixture::new();
-    fs::create_dir(f.root.join("target")).unwrap();
-    fs::write(f.root.join("target/legacy.o"), "old compiler output").unwrap();
+    f.select_binary("legacy");
+    fs::create_dir_all(f.root.join(artifact("legacy")).parent().unwrap()).unwrap();
+    fs::write(f.root.join(artifact("legacy")), "old compiler output").unwrap();
     let output = f
         .command(&["build"])
-        .env("FAKE_BUILD_OUTPUT", "target/legacy.o")
+        .env("FAKE_BUILD_OUTPUT", artifact("legacy"))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(5));
     assert_eq!(
-        fs::read(f.root.join("target/legacy.o")).unwrap(),
+        fs::read(f.root.join(artifact("legacy"))).unwrap(),
         b"old compiler output"
     );
-    f.build("target/edited.o", false);
-    fs::write(f.root.join("target/edited.o"), "user change").unwrap();
+    f.build("edited", false);
+    fs::write(f.root.join(artifact("edited")), "user change").unwrap();
     f.ok(&["clean"]);
     let output = f
         .command(&["build"])
-        .env("FAKE_BUILD_OUTPUT", "target/edited.o")
+        .env("FAKE_BUILD_OUTPUT", artifact("edited"))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(5));
     f.ok(&["clean"]);
     assert_eq!(
-        fs::read(f.root.join("target/edited.o")).unwrap(),
+        fs::read(f.root.join(artifact("edited"))).unwrap(),
         b"user change"
     );
 }
@@ -167,12 +192,13 @@ fn modified_and_preexisting_outputs_are_preserved_before_compilation() {
 #[test]
 fn partial_compile_output_is_owned_but_unknown_generation_sidecars_survive() {
     let f = Fixture::new();
-    f.build("target/partial.o", true);
+    f.build("partial", true);
+    f.select_binary("app");
     f.ok(&["run"]);
     let generation = f.generation();
     fs::write(generation.join("sidecar"), "program-owned").unwrap();
     f.ok(&["clean"]);
-    assert!(!f.root.join("target/partial.o").exists());
+    assert!(!f.root.join(artifact("partial")).exists());
     assert!(!generation.join(program()).exists());
     assert_eq!(
         fs::read(generation.join("sidecar")).unwrap(),
@@ -184,13 +210,13 @@ fn partial_compile_output_is_owned_but_unknown_generation_sidecars_survive() {
 #[test]
 fn malformed_registry_and_pending_recovery_fail_before_deletion() {
     let f = Fixture::new();
-    f.build("target/owned.o", false);
+    f.build("owned", false);
     let registry = fs::read(f.root.join(".vex/artifacts.json")).unwrap();
     for journal in ["transaction.json", "init.json"] {
         fs::write(f.root.join(".vex").join(journal), "pending").unwrap();
         let output = f.command(&["clean"]).output().unwrap();
         assert!(!output.status.success());
-        assert!(f.root.join("target/owned.o").exists());
+        assert!(f.root.join(artifact("owned")).exists());
         assert_eq!(
             fs::read(f.root.join(".vex").join(journal)).unwrap(),
             b"pending"
@@ -204,7 +230,7 @@ fn malformed_registry_and_pending_recovery_fail_before_deletion() {
     ] {
         fs::write(f.root.join(".vex/artifacts.json"), content).unwrap();
         assert!(!f.command(&["clean"]).output().unwrap().status.success());
-        assert!(f.root.join("target/owned.o").exists());
+        assert!(f.root.join(artifact("owned")).exists());
     }
     fs::write(f.root.join(".vex/artifacts.json"), registry).unwrap();
 }
@@ -214,14 +240,16 @@ fn malformed_registry_and_pending_recovery_fail_before_deletion() {
 fn symlinks_and_permission_edits_are_preserved() {
     use std::os::unix::fs::{symlink, PermissionsExt};
     let f = Fixture::new();
-    f.build("target/sub/owned.o", false);
-    fs::rename(f.root.join("target/sub"), f.root.join("saved")).unwrap();
-    symlink(f.root.join("saved"), f.root.join("target/sub")).unwrap();
-    f.build("target/mode.o", false);
+    f.build_profile("owned", "release", false);
+    let output = f.root.join(artifact_profile("owned", "release"));
+    let directory = output.parent().unwrap();
+    fs::rename(directory, f.root.join("saved")).unwrap();
+    symlink(f.root.join("saved"), directory).unwrap();
+    f.build("mode", false);
     fs::set_permissions(
-        f.root.join("target/mode.o"),
+        f.root.join(artifact("mode")),
         fs::Permissions::from_mode(
-            fs::metadata(f.root.join("target/mode.o"))
+            fs::metadata(f.root.join(artifact("mode")))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -230,8 +258,11 @@ fn symlinks_and_permission_edits_are_preserved() {
     )
     .unwrap();
     f.ok(&["clean"]);
-    assert!(f.root.join("saved/owned.o").exists());
-    assert!(f.root.join("target/mode.o").exists());
+    assert!(f
+        .root
+        .join(format!("saved/owned{}", std::env::consts::EXE_SUFFIX))
+        .exists());
+    assert!(f.root.join(artifact("mode")).exists());
 }
 
 fn accept(listener: &TcpListener) -> TcpStream {
@@ -315,10 +346,10 @@ fn run_lease_protects_orphaned_program_after_vex_is_killed() {
 #[test]
 fn nonregular_owned_paths_do_not_block_cleanup() {
     let f = Fixture::new();
-    f.build("target/owned.o", false);
-    fs::remove_file(f.root.join("target/owned.o")).unwrap();
+    f.build("owned", false);
+    fs::remove_file(f.root.join(artifact("owned"))).unwrap();
     assert!(Command::new("mkfifo")
-        .arg(f.root.join("target/owned.o"))
+        .arg(f.root.join(artifact("owned")))
         .status()
         .unwrap()
         .success());
@@ -341,5 +372,5 @@ fn nonregular_owned_paths_do_not_block_cleanup() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(fs::symlink_metadata(f.root.join("target/owned.o")).is_ok());
+    assert!(fs::symlink_metadata(f.root.join(artifact("owned"))).is_ok());
 }

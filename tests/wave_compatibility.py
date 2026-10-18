@@ -24,6 +24,100 @@ def run(command, cwd, env, *, succeeds=True):
     return result
 
 
+
+def target_profile_smoke(vex, root, env, host_target):
+    """Exercise format 3 through the selected real compiler on each CI host."""
+    app = root / "multiple-targets"
+    dependency = root / "multi-support"
+    for package in (app, dependency):
+        (package / "src").mkdir(parents=True)
+    (dependency / "vex.ws").write_text(
+        '{format=3,name="support",targets={lib={},bins=['
+        '{name="unused",path="src/missing-binary.wave"}]}}\n', encoding="utf-8")
+    (dependency / "src/lib.wave").write_text(
+        'pub fun value() -> i32 { return 42; }\n', encoding="utf-8")
+    (app / "vex.ws").write_text(
+        '{format=3,name="multi",targets={lib={},bins=['
+        '{name="multi",path="src/main.wave"},'
+        '{name="tools",path="src/tools.wave"}]},default_run="multi",'
+        'profiles={fast={inherits="release",opt_level=3}},'
+        'dependencies=[{name="support",path="../multi-support"}]}\n', encoding="utf-8")
+    (app / "src/lib.wave").write_text(
+        'import("support")::{value};\npub fun answer() -> i32 { return value(); }\n'
+        'fun hidden() -> i32 { return 9; }\n', encoding="utf-8")
+    (app / "src/main.wave").write_text(
+        'import("multi")::{answer};\nfun main() -> i32 { '
+        'var result: i32 = answer(); println("default {}", result); return result - 42; }\n',
+        encoding="utf-8")
+    tool_source = ('import("multi")::{answer};\nfun main() -> i32 { '
+                   'var result: i32 = answer(); println("tools {}", result); return result - 42; }\n')
+    (app / "src/tools.wave").write_text(tool_source, encoding="utf-8")
+    run([vex, "fetch", "--offline"], app, env)
+    locked = (app / "vex.lock").read_bytes()
+
+    def snapshot():
+        return {str(path.relative_to(app)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in app.rglob("*") if path.is_file()}
+
+    before = snapshot()
+    planned = run([vex, "build", "--profile", "fast", "--dry-run", "--locked", "--offline"], app, env)
+    envelope = json.loads(planned.stdout)
+    plans = envelope.get("plans", [])
+    if (envelope.get("schema") != "vex.build-plan" or envelope.get("schema_version") != 1
+            or envelope.get("target") != host_target
+            or envelope.get("profile") != {"name": "fast", "opt_level": 3}
+            or [item["package_target"] for item in plans] != [
+                {"name": "multi", "kind": "library"},
+                {"name": "multi", "kind": "binary"},
+                {"name": "tools", "kind": "binary"}]):
+        raise RuntimeError("mixed targets or custom profile were lost in the Vex build-plan")
+    if snapshot() != before:
+        raise RuntimeError("format 3 dry-run changed project files")
+    expected_root = Path("target") / host_target / "fast"
+    expected_paths = []
+    for item in plans:
+        plan = item["compiler_plan"]
+        target = item["package_target"]
+        if plan["target"] != host_target:
+            raise RuntimeError("mixed compiler plan selected the wrong target")
+        if target["kind"] == "library":
+            output = Path(plan["compile"][0]["output"])
+            expected = expected_root / "lib" / ("multi.obj" if "windows" in host_target else "multi.o")
+        else:
+            output = Path(plan["link"]["output"])
+            expected = expected_root / "bin" / (target["name"] + (".exe" if "windows" in host_target else ""))
+        if output != expected:
+            raise RuntimeError(f"unexpected unified output path: {output}, expected {expected}")
+        expected_paths.append(app / output)
+    run([vex, "build", "--profile", "fast", "--locked", "--offline"], app, env)
+    if not all(path.is_file() for path in expected_paths):
+        raise RuntimeError("mixed-target build omitted a planned artifact")
+    for selection, marker in [([], "default 42"), (["--bin", "tools"], "tools 42")]:
+        result = run([vex, "run", *selection, "--profile", "fast", "--locked", "--offline"], app, env)
+        if marker not in result.stdout.splitlines():
+            raise RuntimeError("default_run or explicit binary selection used the wrong target")
+    run([vex, "check", "--profile", "fast", "--locked", "--offline"], app, env)
+    if (dependency / "src/missing-binary.wave").exists() or (dependency / "target").exists():
+        raise RuntimeError("dependency binary targets were built instead of consuming its library")
+    rejected = run([vex, "metadata", "--locked", "--offline"], app, env, succeeds=False)
+    if rejected.returncode != 3 or "--format-version 2" not in rejected.stderr:
+        raise RuntimeError("metadata schema 1 did not reject a mixed-target package")
+    metadata = json.loads(run([vex, "metadata", "--format-version", "2", "--locked", "--offline"], app, env).stdout)
+    if (metadata["schema_version"] != 2 or len(metadata["root"]["targets"]) != 3
+            or metadata["root"]["default_run"] != "multi"
+            or metadata["root"]["profiles"]["fast"]["opt_level"] != 3):
+        raise RuntimeError("metadata schema 2 lost targets, default_run, or custom profiles")
+    (app / "src/tools.wave").write_text(
+        'import("multi")::{hidden};\nfun main() -> i32 { return hidden(); }\n', encoding="utf-8")
+    rejected = run([vex, "check", "--bin", "tools", "--locked", "--offline"], app, env, succeeds=False)
+    if rejected.returncode != 4 or "hidden" not in rejected.stderr or "private" not in rejected.stderr:
+        raise RuntimeError("private self-import did not retain the compiler failure contract")
+    (app / "src/tools.wave").write_text(tool_source, encoding="utf-8")
+    if (app / "vex.lock").read_bytes() != locked:
+        raise RuntimeError("format 3 locked/offline operations changed vex.lock")
+    print("Format 3 targets, output layout, custom profiles, self-import and metadata passed.", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vex", type=Path, required=True)
@@ -73,6 +167,7 @@ def main():
                 raise RuntimeError("compiler plan disagrees with capabilities")
             if command == "build":
                 host_target = plan["target"]
+        target_profile_smoke(vex, root, env, host_target)
         run([vex, "check", "--target", host_target, "--locked", "--offline"], nested, env)
         rejected = run([vex, "build", "--emit=obj"], app, env, succeeds=False)
         if "unknown Vex option" not in rejected.stderr:

@@ -1,5 +1,5 @@
 use diagnostic::Error;
-use manifest::{DependencySource, Manifest};
+use manifest::{DependencySource, Manifest, TargetKind};
 
 pub fn info(args: &[String], selection: &crate::project::Selection) -> Result<(), Error> {
     if matches!(args, [help] if help == "-h" || help == "--help") {
@@ -20,7 +20,22 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
     diagnostic::outln!("Vex project info");
     diagnostic::outln!("name: {}", manifest.name);
     diagnostic::outln!("version: {}", manifest.version);
-    diagnostic::outln!("type: {}", if manifest.lib { "library" } else { "binary" });
+    if manifest.targets.len() == 1 {
+        diagnostic::outln!("type: {}", kind_name(manifest.targets[0].kind));
+    } else {
+        diagnostic::outln!("type: multiple targets");
+        for target in &manifest.targets {
+            diagnostic::outln!(
+                "  {} {} {}",
+                kind_name(target.kind),
+                target.name,
+                target.path.display()
+            );
+        }
+    }
+    if let Some(default_run) = &manifest.default_run {
+        diagnostic::outln!("default_run: {default_run}");
+    }
     diagnostic::outln!("manifest: {}", project.manifest_path.display());
     if let Some(description) = manifest.description.as_ref() {
         diagnostic::outln!("description: {description}");
@@ -71,4 +86,11 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn kind_name(kind: TargetKind) -> &'static str {
+    match kind {
+        TargetKind::Library => "library",
+        TargetKind::Binary => "binary",
+    }
 }

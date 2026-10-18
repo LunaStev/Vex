@@ -12,14 +12,19 @@ Builds and user programs execute from the selected project root.
 
 | Field | Type | Default / meaning |
 | --- | --- | --- |
-| `format` | integer 1 or 2 | 1 when absent; generated manifests use 2 |
+| `format` | integer 1, 2, or 3 | 1 when absent; generated single-target manifests use 2 |
 | `name` | string | Required package/import identity |
 | `version` | version literal or string | `0.1.0`; dependency equality is exact |
-| `lib` | boolean | false; true selects `src/lib.wave`, otherwise `src/main.wave` |
+| `lib` | boolean | Formats 1/2 only: false; true selects `src/lib.wave`, otherwise `src/main.wave` |
 | `compiler` | string | Absent means no version requirement; exact canonical wavec version, including prerelease, without build metadata |
 | `description`, `author`, `license` | string | Optional descriptive metadata |
 | `dependencies` | array of objects | Empty when absent |
-| `native` | object | Optional prebuilt library inputs, search paths and library output; see [native interoperability](native-interop.md) |
+| `native` | object | Prebuilt library inputs and search paths; formats 1/2 also declare library output here; see [native interoperability](native-interop.md) |
+| `targets` | object | Required in format 3; optional `lib` and array `bins` declare at least one target |
+| `default_run` | string | Format 3: optional declared binary name |
+| `profiles` | object | Format 3: dev/release overrides and custom profiles inheriting one builtin |
+| `build` | object | Format 3: optional default compiler `target` triple |
+| `target_config` | array of objects | Format 3: exact-triple sysroot/linker and binary platform overrides |
 
 A dependency requires a unique `name` and exactly one nonempty `path` or `git`
 string. Optional `version` is an exact package version assertion, not a range.
@@ -38,7 +43,12 @@ cannot identify conflicting sources or versions anywhere in the graph.
 }
 ```
 
-Format 1 preserves legacy literal backslashes. Format 2 decodes `\\`, `\"`,
+See [targets, profiles, and artifacts](targets-and-profiles.md) for all format-3
+fields, selection, platform restrictions, and migration. Existing formats are
+not automatically rewritten. Library dependencies may declare binaries in format
+3, but consumers only use their library.
+
+Format 1 preserves legacy literal backslashes. Formats 2 and 3 decode `\\`, `\"`,
 `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, and JSON `\uXXXX` sequences;
 unsupported escapes are rejected. A format change is
 explicit: files are never silently reinterpreted. Additive fields may retain a
@@ -155,8 +165,32 @@ JSONL exclusively to a new file, never mixed into stdout. Failure before program
 start stops Vex; reporting failure after program start warns and preserves the
 program exit. Missing final events mean an incomplete report.
 
-Machine-readable schemas: [metadata](schemas/metadata-v1.json),
+Machine-readable schemas: [metadata v1](schemas/metadata-v1.json),
+[metadata v2](schemas/metadata-v2.json), [build-plan v1](schemas/build-plan-v1.json),
 [doctor](schemas/doctor-v1.json) and
 [message events](schemas/messages-v1.json). Additive fields are permitted; changed
 existing meanings require a new schema version. There is no registry or publish
 command in this release.
+
+
+## Build selection and outputs
+
+`--lib` and repeatable `--bin <name>` select root package targets. Build/check
+without selectors process all root targets; run uses `--bin`, `default_run`, or
+the only binary. `--target <triple>` still selects a compiler platform.
+`--profile <name>` defaults to dev; `--release` aliases the release profile and
+conflicts with an explicit profile. The root's profile is used for imported code.
+
+Every selected target is planned and preflighted before compilation. Targets then
+compile in deterministic order, stopping at the first failure while preserving
+already successful artifacts. General and native output paths are unified under
+`target/<compiler-triple>/<profile>/{bin,lib}/`, with intermediate objects under
+`.vex-obj/<kind>/<name>/<output-kind>/`. Old paths are left untouched. Run keeps an
+independent generation, lease and lock-release boundary.
+
+Dry-run stdout is one `vex.build-plan` schema-1 envelope for single or multiple
+targets. It contains `target`, `profile: {name, opt_level}`, and ordered `plans`
+entries with `package_target: {name, kind}` and the validated `compiler_plan`.
+It replaces the previous direct compiler-plan output. Planning runs once per
+selected target; capability queries are cached within the invocation. See the
+[full build contract](targets-and-profiles.md).

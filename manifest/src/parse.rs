@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use wson::{loads, WsonMap, WsonValue};
+use wson::{loads_versions, WsonMap, WsonValue};
 
 use crate::{Dependency, DependencySource, Manifest};
 
@@ -16,16 +16,50 @@ const ROOT_FIELDS: &[&str] = &[
     "author",
     "license",
     "dependencies",
+    "targets",
+    "default_run",
+    "profiles",
+    "build",
+    "target_config",
 ];
 const DEPENDENCY_FIELDS: &[&str] = &["name", "version", "path", "git", "branch", "tag", "rev"];
 
 pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
-    let data = loads(raw, "format", 2).map_err(|e| format!("failed to parse manifest: {e}"))?;
+    let data = loads_versions(raw, "format", &[2, 3])
+        .map_err(|e| format!("failed to parse manifest: {e}"))?;
     reject_unknown_fields(&data, ROOT_FIELDS, "manifest")?;
-    if !matches!(data.get("format"), None | Some(WsonValue::Int(1 | 2))) {
+    let format = match data.get("format") {
+        None | Some(WsonValue::Int(1)) => 1,
+        Some(WsonValue::Int(2)) => 2,
+        Some(WsonValue::Int(3)) => 3,
+        _ => return Err("unsupported manifest format; expected 1 (legacy), 2 (escaped strings), or 3 (explicit targets)".into()),
+    };
+    if format < 3 {
+        for field in [
+            "targets",
+            "default_run",
+            "profiles",
+            "build",
+            "target_config",
+        ] {
+            if data.contains_key(field) {
+                return Err(format!("manifest field `{field}` requires `format = 3`"));
+            }
+        }
+    } else if data.contains_key("lib") {
         return Err(
-            "unsupported manifest format; expected 1 (legacy) or 2 (escaped strings)".into(),
+            "format 3 declares its library in `targets.lib`; root `lib` is not supported".into(),
         );
+    }
+    if format == 3 {
+        if let Some(WsonValue::Object(native)) = data.get("native") {
+            if native.contains_key("output") || native.contains_key("exports") {
+                return Err(
+                    "format 3 declares library output and exports in `targets.lib`, not `native`"
+                        .into(),
+                );
+            }
+        }
     }
 
     let name = match data.get("name") {
@@ -45,6 +79,15 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     };
     let compiler = parse_optional_string(data.get("compiler"), "compiler")?;
     let native = crate::native::parse(data.get("native"), lib)?;
+    let model = if format == 3 {
+        crate::model::parse(&data, &name)?
+    } else {
+        crate::model::legacy(&name, lib, native.as_ref())
+    };
+    let lib = model
+        .targets
+        .iter()
+        .any(|target| target.kind == crate::TargetKind::Library);
     if let Some(required) = &compiler {
         let version = semver::Version::parse(required)
             .map_err(|_| "manifest compiler must be an exact version such as 0.2.1-pre-beta; ranges are unsupported")?;
@@ -70,16 +113,17 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     }
 
     Ok(Manifest {
-        format: if matches!(data.get("format"), Some(WsonValue::Int(2))) {
-            2
-        } else {
-            1
-        },
+        format,
         compiler,
         name,
         version,
         lib,
         native,
+        targets: model.targets,
+        default_run: model.default_run,
+        profiles: model.profiles,
+        build_target: model.build_target,
+        target_config: model.target_config,
         description,
         author,
         license,

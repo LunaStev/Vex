@@ -161,6 +161,7 @@ impl Compiler {
                 "invalid or inconsistent compiler target-spec",
             ));
         }
+        self.specs.insert(Some(triple.to_owned()), spec.clone());
         self.specs.insert(key, spec.clone());
         Ok(spec)
     }

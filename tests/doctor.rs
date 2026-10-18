@@ -59,6 +59,7 @@ impl Fixture {
             .env("PATH", &self.bin)
             .env("VEX_WAVEC", &self.wavec)
             .env("DOCTOR_LOG", self.root.join("calls.log"))
+            .env("DOCTOR_HOST_TARGET", host_target())
             .env(
                 "DOCTOR_TARGETS",
                 json!([host_target(), "doctor-cross-target"]).to_string(),
@@ -124,13 +125,27 @@ fn main() {
     if args == ["print", "supported-targets", "--format=json"] {
         println!("{}", env::var("DOCTOR_TARGETS").unwrap()); return;
     }
+    let target = args.iter().find_map(|s| s.strip_prefix("--target=")).map(str::to_owned)
+        .unwrap_or_else(|| env::var("DOCTOR_HOST_TARGET").unwrap());
+    if args.first().map(String::as_str) == Some("print") && args.get(1).map(String::as_str) == Some("target-spec") {
+        println!("{{\"triple\":{target:?},\"supported\":true,\"hosted\":true,\"object_format\":\"elf\",\"os\":\"linux\"}}"); return;
+    }
     assert!(args.iter().any(|s| s == "--dry-run"), "doctor must not compile");
     assert!(!args.iter().any(|s| s == "--run"), "doctor must not run");
     if let Ok(error) = env::var("DOCTOR_ERROR") { eprintln!("{error}"); std::process::exit(env::var("DOCTOR_EXIT").ok().and_then(|s| s.parse().ok()).unwrap_or(1)); }
     let schema = env::var("DOCTOR_SCHEMA").unwrap_or_else(|_| "1".into());
-    let link_output = env::var("DOCTOR_LINK_OUTPUT").unwrap_or_else(|_| "target/main".into());
-    let link = env::var("DOCTOR_LINK").map(|p| format!("{{\"output\":{link_output:?},\"inputs\":[],\"program\":{p:?},\"args\":[]}}")).unwrap_or_else(|_| "null".into());
-    println!("{{\"schema_version\":{schema},\"mode\":\"build\",\"target\":\"test-target\",\"emit\":\"bin\",\"emit_kinds\":[],\"control_mode\":null,\"forced_input_type\":null,\"inputs\":[],\"emit_jobs\":[],\"compile\":[],\"link\":{link},\"execute\":null}}");
+    let requested_output = args.windows(2).find(|pair| pair[0] == "-o").map(|pair| pair[1].clone()).unwrap_or_else(|| "target/main".into());
+    let link_output = env::var("DOCTOR_LINK_OUTPUT").unwrap_or(requested_output.clone());
+    let object = args.iter().any(|arg| arg == "--emit=obj");
+    let emit = if object { "obj" } else { "bin" };
+    let program = env::var("DOCTOR_LINK").unwrap_or_else(|_| env::current_exe().unwrap().to_string_lossy().into_owned());
+    let link = if object { "null".into() } else {
+        format!("{{\"output\":{link_output:?},\"inputs\":[],\"program\":{program:?},\"args\":[]}}")
+    };
+    let compile = if object {
+        format!("[{{\"input\":\"src/lib.wave\",\"kind\":\"wave\",\"output\":{requested_output:?},\"command\":\"wavec\"}}]")
+    } else { "[]".into() };
+    println!("{{\"schema_version\":{schema},\"mode\":\"build\",\"target\":{target:?},\"emit\":{emit:?},\"emit_kinds\":[],\"control_mode\":null,\"forced_input_type\":null,\"inputs\":[],\"emit_jobs\":[],\"compile\":{compile},\"link\":{link},\"execute\":null}}");
 }
 "###).unwrap();
         let path = root.join(exe("fake"));
@@ -251,7 +266,10 @@ fn prepared_project_plan_is_checked_under_explicit_selection_without_build_or_mu
         1
     );
     assert_eq!(calls.lines().filter(|s| s.contains("build")).count(), 1);
-    assert!(calls.contains("build src/main.wave --dry-run --error-format=json"));
+    assert!(calls.contains("src/main.wave"));
+    assert!(calls.contains("--dry-run") && calls.contains("--error-format=json"));
+    assert!(calls.contains("-O0"));
+    assert!(calls.contains(&format!("target/{}/dev/bin/doctor_test", host_target())));
     assert_eq!(before, snapshot(&f.work));
 }
 #[test]
@@ -459,4 +477,122 @@ fn unsafe_compiler_outputs_fail_doctor_before_linker_checks_without_writes() {
             .any(|item| item["id"] == "linker"));
         assert_eq!(before, snapshot(&f.work));
     }
+}
+
+#[test]
+fn mixed_targets_use_dev_profile_self_library_mapping_and_all_plans_without_writes() {
+    let f = Fixture::new();
+    f.project(true);
+    fs::create_dir_all(f.work.join("src/bin")).unwrap();
+    fs::write(f.work.join("src/lib.wave"), "pub fun greet() {}\n").unwrap();
+    fs::write(f.work.join("src/bin/admin.wave"), "fun main() {}\n").unwrap();
+    fs::write(
+        f.work.join("vex.ws"),
+        r#"{format=3, name="doctor_test", targets={lib={}, bins=[
+        {name="doctor_test",path="src/main.wave"}, {name="admin",path="src/bin/admin.wave"}
+    ]}, profiles={dev={opt_level=1}}}"#,
+    )
+    .unwrap();
+    let before = snapshot(&f.work);
+    let out = f.json();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = document(&out);
+    let plans = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] == "dry_run")
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 3);
+    assert_eq!(plans[0]["details"]["package_target"]["kind"], "library");
+    assert_eq!(plans[1]["details"]["package_target"]["name"], "admin");
+    assert!(plans.iter().all(|item| item["status"] == "ok"
+        && item["details"]["profile"] == "dev"
+        && item["details"]["opt_level"] == 1));
+    let calls = f.calls();
+    let builds = calls
+        .lines()
+        .filter(|call| call.contains(" build "))
+        .collect::<Vec<_>>();
+    assert_eq!(builds.len(), 3);
+    assert!(builds.iter().all(|call| call.contains("-O1")));
+    assert!(!builds[0].contains("--dep=doctor_test="));
+    assert!(builds[1..]
+        .iter()
+        .all(|call| call.contains("--dep=doctor_test=")));
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|call| call.contains("print target-spec"))
+            .count(),
+        1
+    );
+    assert_eq!(before, snapshot(&f.work));
+    assert!(!f.work.join("target").exists());
+}
+
+#[test]
+fn project_default_compiler_target_is_checked_and_explicit_target_takes_precedence() {
+    let f = Fixture::new();
+    f.project(true);
+    fs::write(f.work.join("vex.ws"), r#"{format=3,name="doctor_test",targets={bins=[{name="app",path="src/main.wave"}]}, build={target="doctor-cross-target"}}"#).unwrap();
+    let out = f
+        .command()
+        .env("DOCTOR_TARGETS", json!(["doctor-cross-target"]).to_string())
+        .args(["doctor", "--format=json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = document(&out);
+    assert_eq!(
+        check(&report, "target")["details"]["requested"],
+        "doctor-cross-target"
+    );
+    assert_eq!(
+        check(&report, "dry_run")["details"]["target"],
+        "doctor-cross-target"
+    );
+    assert!(f.calls().contains("--target=doctor-cross-target"));
+    let out = f
+        .command()
+        .args(["doctor", "--format=json", "--target", &host_target()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        check(&document(&out), "target")["details"]["requested"],
+        host_target()
+    );
+}
+
+#[test]
+fn every_declared_entry_is_validated_before_doctor_plans_any_target() {
+    let f = Fixture::new();
+    f.project(true);
+    fs::write(f.work.join("src/lib.wave"), "pub fun greet() {}\n").unwrap();
+    fs::write(f.work.join("vex.ws"), r#"{format=3,name="doctor_test",targets={lib={},bins=[{name="missing",path="src/bin/missing.wave"}]}}"#).unwrap();
+    let before = snapshot(&f.work);
+    let out = f.json();
+    assert_eq!(out.status.code(), Some(3));
+    let report = document(&out);
+    assert_eq!(check(&report, "entry")["status"], "error");
+    assert!(check(&report, "entry")["message"]
+        .as_str()
+        .unwrap()
+        .contains("missing"));
+    assert_eq!(check(&report, "dry_run")["status"], "not_checked");
+    assert!(!f.calls().lines().any(|call| call.contains(" build ")));
+    assert_eq!(before, snapshot(&f.work));
 }

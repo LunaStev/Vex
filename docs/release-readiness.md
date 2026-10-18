@@ -1,4 +1,4 @@
-# Unreleased: state coordination and format migration
+# Unreleased: targets, profiles, and format migration
 
 This describes the development branch, not an already published Vex release.
 No release version or tag is assigned by this change.
@@ -9,6 +9,7 @@ No release version or tag is assigned by this change.
 | --- | --- | --- | --- |
 | Manifest without `format`, or format 1 | Literal backslashes | Same | Same |
 | Manifest format 2 | JSON string escapes | Same | Same |
+| Manifest format 3 | Explicit package targets/profiles; JSON string escapes | Same; no manifest rewrite | Same |
 | Lockfile v1 | Resolve and migrate to v3 | Reject unchanged | Migrate only from locally available sources |
 | Lockfile v2 | Read legacy strings; successful resolution may migrate to v3 | Preserve bytes if graph matches | Never fetch; migration still allowed without `--locked` |
 | Lockfile v3 | Read/write escaped strings | Preserve bytes if graph matches | Never fetch |
@@ -26,6 +27,35 @@ strings. It preserves URL fragments and former sentinel text, rejects duplicate
 keys, and reports parser source locations. Unsupported versioned escapes fail
 before graph publication. Package version strings retain their existing meaning;
 format versions do not introduce SemVer dependency requirements or a registry.
+
+## Target/profile migration (#46, #47, #48, #54)
+
+Manifest format 3 opts into an explicit library and named binaries, root profiles,
+default run selection, and exact-triple build settings. Legacy formats retain
+their meaning, and are not rewritten. Use `targets.lib` instead of root `lib`,
+and put library output/exports there instead of `native`. Keep native inputs in
+root `native`. Lockfile v3 retains its source, commit and edge meanings.
+
+All manifests now produce ordinary/native outputs under
+`target/<compiler-triple>/<profile>/{bin,lib}/`, with isolated intermediate objects.
+Previous files remain at their old locations; Vex neither moves nor deletes them.
+Only recorded, unchanged outputs qualify for cleanup. Run retains independent
+generations and releases the build lock before starting the program.
+
+`--release` aliases `--profile release`; selecting both is a usage error. New
+profiles have optimization levels 0–3 and inherit only dev or release. Build/check
+default to all root targets; run requires an unambiguous binary choice.
+
+Dry-run stdout changes for every project: it is one `vex.build-plan` schema-1
+JSON envelope, containing the profile and target-specific compiler plans, rather
+than a direct compiler plan. Consumers must update their readers. Metadata keeps
+schema 1 as the default for single-target packages; a mixed/multiple-target
+package requires explicit `--format-version 2`. Metadata remains read-only and
+does not query a compiler or guess target-specific output paths.
+
+See [the complete contract](targets-and-profiles.md). These source changes still
+need the normal review and native platform CI; older release evidence does not
+validate this implementation.
 
 ## Dependency transaction
 

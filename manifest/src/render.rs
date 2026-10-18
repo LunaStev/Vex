@@ -1,16 +1,24 @@
 pub fn render_new_manifest(project_name: &str, author: &str, is_lib: bool) -> String {
     format!(
         r#"{{
-    format = 2,
+    format = 3,
     name = "{name}",
     version = 0.1.0,
-    lib = {is_lib},
+    targets = {targets},
     description = "{name} Project",
     author = "{author}",
     license = "Unknown",
     dependencies = []
 }}
 "#,
+        targets = if is_lib {
+            "{ lib = { output = \"object\" } }".to_string()
+        } else {
+            format!(
+                "{{ bins = [{{ name = \"{}\", path = \"src/main.wave\" }}] }}",
+                escape_wson_string(project_name)
+            )
+        },
         name = escape_wson_string(project_name),
         author = escape_wson_string(author)
     )

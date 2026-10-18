@@ -12,13 +12,13 @@ Vex - Wave package manager
 Usage:
   vex [-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]
   vex init [--lib]
-  vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
-  vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]
-  vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
+  vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
+  vex run [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]
+  vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
   vex fetch [--locked] [--offline]
   vex update [<package>...]
   vex info
-  vex metadata [--format=json] [--locked] [--offline]
+  vex metadata [--format=json] [--format-version <1|2>] [--locked] [--offline]
   vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]
   vex clean [--dry-run]
   vex prune [--apply] [--dry-run]
@@ -40,19 +40,19 @@ usage: vex init [--lib]
 ## build
 
 ```text
-usage: vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
+usage: vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline]
 ```
 
 ## check
 
 ```text
-usage: vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]
+usage: vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline]
 ```
 
 ## run
 
 ```text
-usage: vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]
+usage: vex run [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline] [-- <args...>]
 ```
 
 ## fetch
@@ -84,7 +84,7 @@ usage: vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]
 ## metadata
 
 ```text
-usage: vex metadata [--format=json] [--locked] [--offline]
+usage: vex metadata [--format=json] [--format-version <1|2>] [--locked] [--offline]
 ```
 
 ## doctor

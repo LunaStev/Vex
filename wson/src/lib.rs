@@ -22,6 +22,15 @@ pub fn read_document(path: &std::path::Path) -> Result<String, std::io::Error> {
 }
 
 pub fn loads(raw: &str, version_key: &str, escaped_version: i64) -> Result<WsonMap, String> {
+    loads_versions(raw, version_key, &[escaped_version])
+}
+
+/// Decode escapes only for the explicitly listed format versions.
+pub fn loads_versions(
+    raw: &str,
+    version_key: &str,
+    escaped_versions: &[i64],
+) -> Result<WsonMap, String> {
     if raw.len() > MAX_DOCUMENT_BYTES {
         return Err("WSON document exceeds 8 MiB".into());
     }
@@ -32,7 +41,8 @@ pub fn loads(raw: &str, version_key: &str, escaped_version: i64) -> Result<WsonM
         escapes: None,
     };
     let map = parser.document()?;
-    let escaped = matches!(map.get(version_key), Some(WsonValue::Int(v)) if *v == escaped_version);
+    let escaped =
+        matches!(map.get(version_key), Some(WsonValue::Int(v)) if escaped_versions.contains(v));
     parser.pos = 0;
     parser.escapes = Some(escaped);
     parser.document()
@@ -251,6 +261,20 @@ mod tests {
         assert!(loads("{value=1,value=2}", "format", 2)
             .unwrap_err()
             .contains("duplicate"));
+    }
+
+    #[test]
+    fn multiple_supported_formats_do_not_enable_unknown_format_escapes() {
+        for format in [2, 3] {
+            let raw = format!(r#"{{format={format},value="line\nnext"}}"#);
+            let parsed = loads_versions(&raw, "format", &[2, 3]).unwrap();
+            assert!(matches!(&parsed["value"], WsonValue::String(value) if value == "line\nnext"));
+        }
+        let parsed = loads_versions(r#"{format=4,value="line\nnext"}"#, "format", &[2, 3]).unwrap();
+        assert!(matches!(&parsed["value"], WsonValue::String(value) if value == r"line\nnext"));
+        // Existing single-version callers retain their exact-version boundary.
+        let parsed = loads(r#"{format=3,value="line\nnext"}"#, "format", 2).unwrap();
+        assert!(matches!(&parsed["value"], WsonValue::String(value) if value == r"line\nnext"));
     }
 }
 

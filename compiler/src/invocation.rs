@@ -19,14 +19,159 @@ impl Execution {
     }
 }
 
-pub fn run_build_with_dry_run(
+/// A validated compiler plan. Constructing it does not create build outputs.
+pub struct PreparedBuild {
+    plan: serde_json::Value,
+    args: Vec<String>,
+    root: PathBuf,
+    outputs: Vec<PathBuf>,
+    optional_outputs: Vec<PathBuf>,
+    execution: Option<(Execution, PathBuf)>,
+    generation: Option<PathBuf>,
+}
+impl PreparedBuild {
+    pub fn plan(&self) -> &serde_json::Value {
+        &self.plan
+    }
+    pub fn output_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.outputs.iter().chain(&self.optional_outputs)
+    }
+    /// Validate ownership for the full batch before any target is compiled.
+    pub fn preflight_ownership(&self) -> Result<(), Error> {
+        state::artifacts::Batch::prepare_with_optional(
+            &self.root,
+            self.outputs.clone(),
+            self.optional_outputs.iter().cloned(),
+        )
+        .map(|_| ())
+        .map_err(Error::environment)
+    }
+    pub fn execute(
+        self,
+        compiler: &crate::Compiler,
+        mut report: Option<&mut dyn FnMut(serde_json::Value) -> Result<(), Error>>,
+    ) -> Result<Option<Execution>, Error> {
+        let Self {
+            plan,
+            args,
+            root,
+            outputs,
+            optional_outputs,
+            execution,
+            generation,
+        } = self;
+        let wavec = &compiler.path;
+        state::ensure_dir(Path::new("target")).map_err(Error::environment)?;
+        let mut compile_args: Vec<_> = args[..]
+            .iter()
+            .filter(|a| a.as_str() != "--run")
+            .cloned()
+            .collect();
+        let ownership = state::artifacts::Batch::prepare_with_optional(
+            &root,
+            outputs,
+            optional_outputs.iter().cloned(),
+        )
+        .map_err(Error::environment)?;
+        let compile_result = (|| -> Result<ExitStatus, Error> {
+            let status = if let Some(sink) = report.as_mut() {
+                insert_build_flag(&mut compile_args, "--error-format=json");
+                let output =
+                    process::output_without_deadline(Command::new(wavec).args(&compile_args))
+                        .map_err(Error::environment)?;
+                diagnostic::output::stdout(format_args!(
+                    "{}",
+                    String::from_utf8_lossy(&output.stdout)
+                ))?;
+                // Compiler diagnostics retain their original structured payload and spans.
+                // User-program streams never pass through this compiler-only capture.
+                diagnostic::output::stderr(format_args!(
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))?;
+                emit_diagnostics(&output.stderr, &mut **sink)?;
+                output.status
+            } else {
+                process::status(Command::new(wavec).args(&compile_args), None, false).map_err(
+                    |e| {
+                        Error::environment(format!(
+                            "failed to execute `{}` build: {e}",
+                            wavec.display()
+                        ))
+                    },
+                )?
+            };
+            Ok(status)
+        })();
+        let compile_result = compile_result.and_then(|status| {
+            if status.success() {
+                ownership.verify_outputs().map_err(Error::compiler)
+            } else {
+                Err(compiler_error(
+                    status,
+                    format!("wavec build failed [{}]", classify_exit(status)),
+                ))
+            }
+        });
+        finish_compilation(compile_result, ownership.finish())?;
+        if let Some(sink) = report.as_mut() {
+            let mut outputs: Vec<_> = if let Some(output) = plan["link"]["output"].as_str() {
+                vec![output.to_owned()]
+            } else {
+                plan["compile"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|job| job["output"].as_str().map(str::to_owned))
+                    .collect()
+            };
+            outputs.extend(
+                optional_outputs
+                    .iter()
+                    .filter(|path| path.is_file())
+                    .map(|path| path.to_string_lossy().into_owned()),
+            );
+            sink(
+                serde_json::json!({"event":"artifact", "origin":"vex", "target":plan["target"],
+            "emit":plan["emit"], "paths":outputs, "executable":execution.as_ref().map(|(_,path)| path)}),
+            )?;
+        }
+        if let Some((execution, output)) = execution {
+            state::reject_link(&output).map_err(Error::environment)?;
+            let actual = output.canonicalize().map_err(|e| {
+                Error::new(
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        diagnostic::Category::Compiler
+                    } else {
+                        diagnostic::Category::Environment
+                    },
+                    format!("compiler did not produce {}: {e}", output.display()),
+                )
+            })?;
+            let generation = generation
+                .as_deref()
+                .unwrap()
+                .canonicalize()
+                .map_err(|e| Error::environment(e.to_string()))?;
+            if !actual.starts_with(&generation) || !actual.is_file() {
+                return Err(Error::compiler(
+                    "compiler output escaped the run generation",
+                ));
+            }
+            return Ok(Some(execution));
+        }
+        Ok(None)
+    }
+}
+
+pub fn prepare_build(
     compiler: &crate::Compiler,
     args: &[String],
     runtime: &[OsString],
     user_requested_dry_run: bool,
     generation: Option<&Path>,
     mut report: Option<&mut dyn FnMut(serde_json::Value) -> Result<(), Error>>,
-) -> Result<Option<Execution>, Error> {
+) -> Result<PreparedBuild, Error> {
     let mut dry_run_args = args.to_vec();
     if !contains_dry_run_flag(&dry_run_args) {
         insert_build_flag(&mut dry_run_args, "--dry-run");
@@ -91,123 +236,151 @@ pub fn run_build_with_dry_run(
     };
     let root = std::env::current_dir().map_err(Error::environment)?;
     let (outputs, optional_outputs) = validate_plan_outputs(&plan, &root, &args[..separator])?;
-    if user_requested_dry_run {
-        if !runtime.is_empty() {
-            let values = runtime
-                .iter()
-                .map(|arg| {
-                    arg.to_str().map(str::to_owned).ok_or_else(|| {
-                        Error::usage("dry-run JSON cannot represent non-UTF-8 program arguments")
-                    })
+    validate_requested_outputs(&plan, &root, &args[..separator])?;
+    if user_requested_dry_run && !runtime.is_empty() {
+        let values = runtime
+            .iter()
+            .map(|arg| {
+                arg.to_str().map(str::to_owned).ok_or_else(|| {
+                    Error::usage("dry-run JSON cannot represent non-UTF-8 program arguments")
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-            let args = plan["execute"]["args"]
-                .as_array_mut()
-                .ok_or_else(|| Error::compiler("run plan is missing execute.args"))?;
-            args.extend(values.into_iter().map(serde_json::Value::String));
-        }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let args = plan["execute"]["args"]
+            .as_array_mut()
+            .ok_or_else(|| Error::compiler("run plan is missing execute.args"))?;
+        args.extend(values.into_iter().map(serde_json::Value::String));
+    }
+    Ok(PreparedBuild {
+        plan,
+        args: args[..separator].to_vec(),
+        root,
+        outputs,
+        optional_outputs,
+        execution,
+        generation: generation.map(Path::to_path_buf),
+    })
+}
+
+/// Compatibility entry point for callers that need only one compiler plan.
+pub fn run_build_with_dry_run(
+    compiler: &crate::Compiler,
+    args: &[String],
+    runtime: &[OsString],
+    user_requested_dry_run: bool,
+    generation: Option<&Path>,
+    mut report: Option<&mut dyn FnMut(serde_json::Value) -> Result<(), Error>>,
+) -> Result<Option<Execution>, Error> {
+    let prepared = if let Some(sink) = report.as_mut() {
+        prepare_build(
+            compiler,
+            args,
+            runtime,
+            user_requested_dry_run,
+            generation,
+            Some(&mut **sink),
+        )?
+    } else {
+        prepare_build(
+            compiler,
+            args,
+            runtime,
+            user_requested_dry_run,
+            generation,
+            None,
+        )?
+    };
+    if user_requested_dry_run {
         diagnostic::outln!(
             "{}",
-            serde_json::to_string_pretty(&plan).map_err(Error::internal)?
+            serde_json::to_string_pretty(prepared.plan()).map_err(Error::internal)?
         );
-        return Ok(None);
+        Ok(None)
+    } else {
+        prepared.execute(compiler, report)
     }
-    state::ensure_dir(Path::new("target")).map_err(Error::environment)?;
-    let mut compile_args: Vec<_> = args[..separator]
-        .iter()
-        .filter(|a| a.as_str() != "--run")
-        .cloned()
-        .collect();
-    let ownership = state::artifacts::Batch::prepare_with_optional(
-        &root,
-        outputs,
-        optional_outputs.iter().cloned(),
-    )
-    .map_err(Error::environment)?;
-    let compile_result = (|| -> Result<ExitStatus, Error> {
-        let status = if let Some(sink) = report.as_mut() {
-            insert_build_flag(&mut compile_args, "--error-format=json");
-            let output = process::output_without_deadline(Command::new(wavec).args(&compile_args))
-                .map_err(Error::environment)?;
-            diagnostic::output::stdout(format_args!(
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
-            ))?;
-            // Compiler diagnostics retain their original structured payload and spans.
-            // User-program streams never pass through this compiler-only capture.
-            diagnostic::output::stderr(format_args!(
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            ))?;
-            emit_diagnostics(&output.stderr, &mut **sink)?;
-            output.status
-        } else {
-            process::status(Command::new(wavec).args(&compile_args), None, false).map_err(|e| {
-                Error::environment(format!(
-                    "failed to execute `{}` build: {e}",
-                    wavec.display()
-                ))
-            })?
-        };
-        Ok(status)
-    })();
-    let compile_result = compile_result.and_then(|status| {
-        if status.success() {
-            ownership.verify_outputs().map_err(Error::compiler)
-        } else {
-            Err(compiler_error(
-                status,
-                format!("wavec build failed [{}]", classify_exit(status)),
-            ))
-        }
-    });
-    finish_compilation(compile_result, ownership.finish())?;
-    if let Some(sink) = report.as_mut() {
-        let mut outputs: Vec<_> = if let Some(output) = plan["link"]["output"].as_str() {
-            vec![output.to_owned()]
-        } else {
-            plan["compile"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|job| job["output"].as_str().map(str::to_owned))
-                .collect()
-        };
-        outputs.extend(
-            optional_outputs
-                .iter()
-                .filter(|path| path.is_file())
-                .map(|path| path.to_string_lossy().into_owned()),
-        );
-        sink(
-            serde_json::json!({"event":"artifact", "origin":"vex", "target":plan["target"],
-            "emit":plan["emit"], "paths":outputs, "executable":execution.as_ref().map(|(_,path)| path)}),
-        )?;
-    }
-    if let Some((execution, output)) = execution {
-        state::reject_link(&output).map_err(Error::environment)?;
-        let actual = output.canonicalize().map_err(|e| {
-            Error::new(
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    diagnostic::Category::Compiler
-                } else {
-                    diagnostic::Category::Environment
-                },
-                format!("compiler did not produce {}: {e}", output.display()),
-            )
-        })?;
-        let generation = generation
-            .unwrap()
-            .canonicalize()
-            .map_err(|e| Error::environment(e.to_string()))?;
-        if !actual.starts_with(&generation) || !actual.is_file() {
+}
+
+/// Bind compiler destinations to the artifact identity selected by Vex. Merely
+/// remaining somewhere under target/ is insufficient for a multi-target batch.
+fn validate_requested_outputs(
+    plan: &serde_json::Value,
+    root: &Path,
+    args: &[String],
+) -> Result<(), Error> {
+    if args.iter().any(|arg| arg == "--emit=check") {
+        if plan["emit"] != "check"
+            || !plan["link"].is_null()
+            || !plan["compile"].as_array().unwrap().is_empty()
+            || !plan["emit_jobs"].as_array().unwrap().is_empty()
+        {
             return Err(Error::compiler(
-                "compiler output escaped the run generation",
+                "compiler check plan must not emit artifacts",
             ));
         }
-        return Ok(Some(execution));
+        return Ok(());
     }
-    Ok(None)
+    let Some(expected) = args
+        .windows(2)
+        .find(|pair| pair[0] == "-o")
+        .map(|pair| &pair[1])
+    else {
+        return Ok(());
+    };
+    let normalize = |path: &Path| {
+        let path = root.join(path);
+        let mut result = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    result.pop();
+                }
+                _ => result.push(component.as_os_str()),
+            }
+        }
+        result
+    };
+    let expected = normalize(Path::new(expected));
+    let compile = plan["compile"].as_array().unwrap();
+    let object = args.iter().any(|arg| arg == "--emit=obj");
+    if object && (plan["emit"] != "obj" || !plan["link"].is_null()) {
+        return Err(Error::compiler(
+            "compiler object plan does not match the selected package target output kind",
+        ));
+    }
+    if !object && (plan["emit"] != "bin" || plan["link"].is_null()) {
+        return Err(Error::compiler(
+            "compiler linked plan does not match the selected package target output kind",
+        ));
+    }
+    if let Some(output) = plan["link"]["output"].as_str() {
+        if normalize(Path::new(output)) != expected {
+            return Err(Error::compiler(
+                "compiler plan final output does not match the selected package target output",
+            ));
+        }
+        if let Some(directory) = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--target-dir="))
+        {
+            let directory = normalize(Path::new(directory));
+            for job in compile {
+                let output = normalize(Path::new(job["output"].as_str().unwrap()));
+                if output == directory || !output.starts_with(&directory) {
+                    return Err(Error::compiler("compiler plan intermediate output escapes the selected package target directory"));
+                }
+            }
+        }
+    } else if plan["emit"] != "obj"
+        || compile.len() != 1
+        || normalize(Path::new(compile[0]["output"].as_str().unwrap())) != expected
+    {
+        return Err(Error::compiler(
+            "compiler object plan does not match the selected package target output",
+        ));
+    }
+    Ok(())
 }
 
 fn finish_compilation(
