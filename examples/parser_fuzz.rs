@@ -35,15 +35,17 @@ fn main() {
         args.next()
             .unwrap_or_else(|| "target/parser-fuzz-crash".into()),
     );
-    let seeds: [&[u8]; 3] = [
+    let seeds: [&[u8]; 4] = [
         br#"{format=2,name="app",compiler="0.2.1-pre-beta",dependencies=[]}"#,
+        br#"{format=3,name="app",targets={lib={},bins=[{name="app",path="src/main.wave"}]},default_run="app",profiles={fast={inherits="release",opt_level=3}},target_config=[{triple="wasm32-wasip1",bins=[{name="app",mode="wasi"}]}]}"#,
         br#"{version=3,package=[]}"#,
         br#"{"schema_version":1,"compile":[],"link":null,"execute":null}"#,
     ];
     let mut state = seed;
     for index in 0..count {
-        let kind = index % 3;
-        let mut bytes = seeds[kind].to_vec();
+        let corpus = index % seeds.len();
+        let kind = corpus.saturating_sub(1);
+        let mut bytes = seeds[corpus].to_vec();
         let mut random = || {
             state ^= state << 13;
             state ^= state >> 7;

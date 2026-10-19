@@ -1,9 +1,15 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+mod model;
 mod native;
 mod parse;
 mod render;
 
+pub use model::{
+    BinaryOverride, BuildProfile, PackageTarget, PlatformMode, PlatformSettings, Startup,
+    TargetConfig, TargetKind,
+};
 pub use native::{NativeConfig, NativeLibrary, NativeOutput, NativeSearchPath};
 pub use render::render_new_manifest;
 
@@ -13,6 +19,11 @@ pub fn decode(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
 }
 
 pub const MANIFEST_FILE: &str = "vex.ws";
+
+/// Validate a target name before writing an explicit-target manifest.
+pub fn validate_target_name(name: &str) -> Result<(), String> {
+    model::validate_component(name, "target name")
+}
 
 /// Package names are Wave import identifiers. Never silently normalize a name.
 pub fn validate_package_name(name: &str) -> Result<(), String> {
@@ -57,6 +68,11 @@ pub struct Manifest {
     pub version: String,
     pub lib: bool,
     pub native: Option<NativeConfig>,
+    pub targets: Vec<PackageTarget>,
+    pub default_run: Option<String>,
+    pub profiles: BTreeMap<String, BuildProfile>,
+    pub build_target: Option<String>,
+    pub target_config: Vec<TargetConfig>,
     pub description: Option<String>,
     pub author: Option<String>,
     pub license: Option<String>,
@@ -109,10 +125,36 @@ impl Manifest {
     }
 
     pub fn default_entry_path(&self) -> PathBuf {
-        if self.lib {
-            PathBuf::from("src/lib.wave")
-        } else {
-            PathBuf::from("src/main.wave")
+        self.targets
+            .iter()
+            .find(|target| target.kind == TargetKind::Library)
+            .or_else(|| self.targets.first())
+            .expect("validated manifests have targets")
+            .path
+            .clone()
+    }
+
+    pub fn profile(&self, name: &str) -> Result<&BuildProfile, String> {
+        self.profiles
+            .get(name)
+            .ok_or_else(|| format!("unknown build profile `{name}`"))
+    }
+
+    pub fn platform_for(&self, target: &PackageTarget, triple: &str) -> PlatformSettings {
+        let mut platform = target.platform.clone();
+        if let Some(overrides) = self
+            .target_config
+            .iter()
+            .find(|config| config.triple == triple)
+            .and_then(|config| {
+                config
+                    .bins
+                    .iter()
+                    .find(|bin| bin.name == target.name && target.kind == TargetKind::Binary)
+            })
+        {
+            platform.overlay(&overrides.platform);
         }
+        platform
     }
 }

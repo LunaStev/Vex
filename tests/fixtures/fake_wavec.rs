@@ -31,7 +31,7 @@ fn main() {
         let status = std::process::Command::new(&args[0]).args(&args[1..]).status().unwrap();
         std::process::exit(status.code().unwrap_or(1));
     }
-    if env::current_exe().unwrap().file_stem().unwrap() == "program" {
+    if env::current_exe().unwrap().file_stem().unwrap() == "program" || env::current_exe().unwrap().components().any(|c| c.as_os_str() == ".vex-run") {
         if let Ok(vex) = env::var("VEX_TEST_NESTED") {
             assert!(std::process::Command::new(vex).args(["fetch", "--locked", "--offline"]).status().unwrap().success());
         }
@@ -58,7 +58,7 @@ fn main() {
     }
     if args.first().is_some_and(|s| s == "print") {
         if args.get(1).is_some_and(|s| s == "target-spec") {
-            let target = args.iter().find_map(|a| a.strip_prefix("--target=")).unwrap_or("x86_64-unknown-linux-gnu");
+            let target = args.iter().find_map(|a| a.strip_prefix("--target=")).unwrap_or(if cfg!(windows) { "x86_64-pc-windows-msvc" } else if cfg!(target_os="macos") { "x86_64-apple-darwin" } else { "x86_64-unknown-linux-gnu" });
             let (os, format) = if target.contains("windows") { ("windows", "coff") }
                 else if target.contains("darwin") { ("macos", "macho") }
                 else { ("linux", "elf") };
@@ -69,13 +69,13 @@ fn main() {
         println!("{}", env::var("FAKE_TARGETS").unwrap_or_else(|_| "[\"x86_64-unknown-linux-gnu\",\"aarch64-unknown-linux-gnu\"]".into()));
         return;
     }
-    let generation = args.iter().find_map(|a| a.strip_prefix("--target-dir=")).map(PathBuf::from);
+    let explicit_output = args.iter().position(|a| a == "-o").and_then(|i| args.get(i+1)).map(PathBuf::from);
     if args.iter().any(|a| a == "--dry-run") {
         checkpoint("PLAN");
         let mode = if args.iter().any(|a| a == "--run") { "build+run" } else { "build" };
+        let emit = if args.iter().any(|a| a == "--emit=check") { "check" } else { "bin" };
         let schema = env::var("FAKE_SCHEMA").unwrap_or_else(|_| "1".into());
-        let output = generation.map(|p| p.join(if cfg!(windows) { "program.exe" } else { "program" }))
-            .or_else(|| env::var_os("FAKE_BUILD_OUTPUT").map(PathBuf::from));
+        let output = env::var_os("FAKE_BUILD_OUTPUT").map(PathBuf::from).or_else(|| explicit_output.clone());
         let (link, execute) = if let Some(output) = output {
             let output = env::var("FAKE_OUTPUT").unwrap_or_else(|_| output.to_string_lossy().into_owned());
             let link = format!("{{\"output\":{output:?},\"inputs\":[],\"program\":\"linker\",\"args\":[]}}");
@@ -85,7 +85,7 @@ fn main() {
             } else { format!("{{\"program\":{output:?},\"args\":{runtime:?}}}") };
             (link, if mode == "build+run" { execute } else { "null".into() })
         } else { ("null".into(), "null".into()) };
-        println!("{{\"schema_version\":{schema},\"mode\":\"{mode}\",\"target\":\"test-target\",\"emit\":\"bin\",\"emit_kinds\":[],\"control_mode\":null,\"forced_input_type\":null,\"inputs\":[],\"emit_jobs\":[],\"compile\":[],\"link\":{link},\"execute\":{execute}}}");
+        println!("{{\"schema_version\":{schema},\"mode\":\"{mode}\",\"target\":\"test-target\",\"emit\":\"{emit}\",\"emit_kinds\":[],\"control_mode\":null,\"forced_input_type\":null,\"inputs\":[],\"emit_jobs\":[],\"compile\":[],\"link\":{link},\"execute\":{execute}}}");
     } else {
         assert!(!args.iter().any(|a| a == "--run" || a == "--"));
         checkpoint("COMPILE");
@@ -94,9 +94,11 @@ fn main() {
             fs::write(output, b"compiled artifact").unwrap();
         }
         if let Ok(code) = env::var("VEX_TEST_COMPILE_EXIT") { std::process::exit(code.parse().unwrap()); }
-        if let Some(generation) = generation {
-            fs::create_dir_all(&generation).unwrap();
-            fs::copy(env::current_exe().unwrap(), generation.join(if cfg!(windows) { "program.exe" } else { "program" })).unwrap();
+        if env::var_os("FAKE_BUILD_OUTPUT").is_none() {
+            if let Some(output) = explicit_output {
+                fs::create_dir_all(output.parent().unwrap()).unwrap();
+                fs::copy(env::current_exe().unwrap(), &output).unwrap();
+            }
         } else { println!("FAKE_WAVEC_EXECUTED"); }
     }
 }

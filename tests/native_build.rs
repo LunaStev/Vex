@@ -180,7 +180,13 @@ fn code(output: &Output, expected: i32) {
 }
 fn plan(output: &Output) -> Value {
     code(output, 0);
-    serde_json::from_slice(&output.stdout).unwrap()
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    if value.get("plans").is_some() {
+        assert_eq!(value["plans"].as_array().unwrap().len(), 1);
+        value["plans"][0]["compiler_plan"].clone()
+    } else {
+        value
+    }
 }
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn visit(root: &Path, directory: &Path, result: &mut BTreeMap<PathBuf, Vec<u8>>) {
@@ -239,7 +245,8 @@ fn dry_run_selects_package_target_and_profile_outputs_without_mutation() {
         assert_eq!(
             output,
             &json!(format!(
-                "target/x86_64-unknown-linux-gnu/release/{filename}"
+                "target/x86_64-unknown-linux-gnu/release/{}/{filename}",
+                if lib { "lib" } else { "bin" }
             ))
         );
         assert_eq!(snapshot(&f.project), before);
@@ -273,7 +280,10 @@ fn explicit_targets_choose_windows_and_macos_library_names() {
         } else {
             &value["link"]["output"]
         };
-        assert_eq!(output, &json!(format!("target/{target}/dev/{filename}")));
+        assert_eq!(
+            output,
+            &json!(format!("target/{target}/dev/lib/{filename}"))
+        );
         assert_eq!(value["target"], target);
         assert!(!f.project.join("target").exists());
     }
@@ -351,7 +361,7 @@ fn root_and_transitive_inputs_use_the_declaring_package_and_preserve_link_order(
     assert_eq!(fs::read(f.project.join("vex.lock")).unwrap(), lock);
     assert!(f
         .project
-        .join("target/x86_64-unknown-linux-gnu/dev/app")
+        .join("target/x86_64-unknown-linux-gnu/dev/bin/app")
         .is_file());
 }
 
@@ -432,7 +442,7 @@ fn native_named_library_uses_target_specific_shared_then_static_candidates() {
 
 #[test]
 fn prebuilt_native_input_that_aliases_a_compile_output_is_preserved() {
-    let relative = "target/x86_64-unknown-linux-gnu/dev/.vex-obj/app/native.o";
+    let relative = "target/x86_64-unknown-linux-gnu/dev/.vex-obj/bin/app/binary/native.o";
     let f = Fixture::new(
         false,
         &format!(",native={{libraries=[{{path=\"{relative}\"}}]}}"),
@@ -446,7 +456,7 @@ fn prebuilt_native_input_that_aliases_a_compile_output_is_preserved() {
     assert!(!f.project.join("compiler-started").exists());
     assert!(!f
         .project
-        .join("target/x86_64-unknown-linux-gnu/dev/app")
+        .join("target/x86_64-unknown-linux-gnu/dev/bin/app")
         .exists());
 }
 
@@ -584,7 +594,7 @@ fn check_validates_manifest_inputs_without_linking_or_emitting_native_artifacts(
     assert!(f.project.join("compiler-started").exists());
     assert!(!f
         .project
-        .join("target/x86_64-unknown-linux-gnu/dev/libapp.so")
+        .join("target/x86_64-unknown-linux-gnu/dev/lib/libapp.so")
         .exists());
 }
 
@@ -662,6 +672,96 @@ fn native_run_uses_an_independent_generation_and_preserves_program_exit_and_argu
     assert!(f.project.join(output).is_file());
     assert!(!f
         .project
-        .join("target/x86_64-unknown-linux-gnu/dev/app")
+        .join("target/x86_64-unknown-linux-gnu/dev/bin/app")
         .exists());
+}
+
+#[test]
+fn format_three_shared_library_and_same_named_binary_have_disjoint_windows_outputs() {
+    let f = Fixture::new(false, "");
+    fs::write(
+        f.project.join("src/lib.wave"),
+        "export(c) fun wave_add() -> i32 { return 1; }\n",
+    )
+    .unwrap();
+    fs::write(f.project.join("vex.ws"), r#"{format=3,name="app",targets={lib={output="shared",exports=["wave_add"]},bins=[{name="app",path="src/main.wave"}]},default_run="app"}"#).unwrap();
+    let result = f.run(&["build", "--target=x86_64-pc-windows-msvc", "--dry-run"]);
+    code(&result, 0);
+    let envelope: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let plans = envelope["plans"].as_array().unwrap();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0]["package_target"]["kind"], "library");
+    assert_eq!(plans[1]["package_target"]["kind"], "binary");
+    assert_eq!(
+        plans[0]["compiler_plan"]["link"]["output"],
+        "target/x86_64-pc-windows-msvc/dev/lib/app.dll"
+    );
+    assert_eq!(
+        plans[1]["compiler_plan"]["link"]["output"],
+        "target/x86_64-pc-windows-msvc/dev/bin/app.exe"
+    );
+    assert_eq!(
+        plans[0]["compiler_plan"]["link"]["args"],
+        json!(["/EXPORT:wave_add"])
+    );
+    assert_eq!(plans[1]["compiler_plan"]["link"]["args"], json!([]));
+    assert_ne!(
+        plans[0]["compiler_plan"]["compile"][0]["output"],
+        plans[1]["compiler_plan"]["compile"][0]["output"]
+    );
+    let invocations = f.invocations();
+    let binary = invocations
+        .iter()
+        .rev()
+        .find(|args| args.iter().any(|arg| arg == "src/main.wave"))
+        .unwrap();
+    assert!(binary.iter().any(|arg| arg.starts_with("--dep=app=")));
+    assert!(!f.project.join("target").exists());
+}
+
+#[test]
+fn format_three_mixed_dependencies_link_only_declared_native_inputs_in_order() {
+    let f = Fixture::new(false, "");
+    let leaf = f.package("leaf", true, ",native={libraries=[{path=\"leaf.a\"}]}", "");
+    let middle = f.package("middle", true, "", "{name=\"leaf\",path=\"../leaf\"}");
+    fs::write(middle.join("vex.ws"), r#"{format=3,name="middle",targets={lib={},bins=[{name="tool",path="src/tool.wave"}]},native={libraries=[{path="middle.a"}]},dependencies=[{name="leaf",path="../leaf"}]}"#).unwrap();
+    fs::write(
+        f.project.join("src/lib.wave"),
+        "pub fun answer() -> i32 { return 42; }\n",
+    )
+    .unwrap();
+    fs::write(f.project.join("vex.ws"), r#"{format=3,name="app",targets={lib={},bins=[{name="app",path="src/main.wave"}]},native={libraries=[{path="root.a"}]},dependencies=[{name="middle",path="../middle"}]}"#).unwrap();
+    for (root, name) in [
+        (&f.project, "root.a"),
+        (&middle, "middle.a"),
+        (&leaf, "leaf.a"),
+    ] {
+        fs::write(root.join(name), "prebuilt archive").unwrap();
+    }
+    code(&f.run(&["fetch", "--offline"]), 0);
+    let result = f.run(&[
+        "build",
+        "--bin",
+        "app",
+        "--locked",
+        "--offline",
+        "--dry-run",
+    ]);
+    code(&result, 0);
+    let args = f.build_arguments();
+    let inputs = link_arguments(&args);
+    assert_eq!(inputs.len(), 3);
+    for (actual, expected) in inputs.iter().zip([
+        f.project.join("root.a"),
+        middle.join("middle.a"),
+        leaf.join("leaf.a"),
+    ]) {
+        assert_path(actual, &expected);
+    }
+    assert!(args.iter().any(|arg| arg.starts_with("--dep=app=")));
+    assert!(!args.iter().any(|arg| arg.contains("src/tool.wave")));
+    assert!(!args
+        .iter()
+        .any(|arg| arg.ends_with("lib/app.o") || arg.ends_with("lib/middle.o")));
+    assert!(!f.project.join("compiler-started").exists());
 }

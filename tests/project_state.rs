@@ -181,9 +181,11 @@ fn running_program_releases_state_and_retains_its_generation() {
         .unwrap()
         .path();
     let artifact = generation.join(if cfg!(windows) {
-        "program.exe"
+        "x86_64-pc-windows-msvc/dev/bin/app.exe"
+    } else if cfg!(target_os = "macos") {
+        "x86_64-apple-darwin/dev/bin/app"
     } else {
-        "program"
+        "x86_64-unknown-linux-gnu/dev/bin/app"
     });
     let original = fs::read(&artifact).unwrap();
     let mut update = f.command(&["update"]).spawn().unwrap();

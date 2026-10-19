@@ -148,6 +148,34 @@
             "string",
             "null"
           ]
+        },
+        "package_target": {
+          "type": "object",
+          "required": [
+            "name",
+            "kind"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "library",
+                "binary"
+              ]
+            }
+          }
+        },
+        "profile": {
+          "type": "string"
+        },
+        "artifact_kind": {
+          "enum": [
+            "object",
+            "shared",
+            "binary"
+          ]
         }
       }
     },

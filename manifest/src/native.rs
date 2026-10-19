@@ -197,7 +197,7 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_path(path: &str, context: &str) -> Result<(), String> {
+pub(crate) fn validate_path(path: &str, context: &str) -> Result<(), String> {
     if path.contains(['\\', ':', '*', '?', '"', '<', '>', '|'])
         || path.split('/').any(|part| {
             part.is_empty()
@@ -212,7 +212,7 @@ fn validate_path(path: &str, context: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn reserved_windows_component(part: &str) -> bool {
+pub(crate) fn reserved_windows_component(part: &str) -> bool {
     let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || ["COM", "LPT"].into_iter().any(|prefix| {

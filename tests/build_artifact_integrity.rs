@@ -9,10 +9,24 @@ use std::sync::{
 
 const COMPILER_SOURCE: &str = r#"
 use std::{env, fs, path::Path, process};
+fn quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
 fn main() {
     let args: Vec<_> = env::args().collect();
     if args.iter().any(|arg| arg == "--version") {
         println!("wavec 0.2.1-pre-beta");
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "print") {
+        if args.get(2).is_some_and(|arg| arg == "supported-targets") {
+            println!("[\"x86_64-unknown-linux-gnu\",\"x86_64-pc-windows-msvc\"]");
+        } else {
+            let triple = args.iter().find_map(|arg| arg.strip_prefix("--target="))
+                .map(str::to_owned).unwrap_or_else(|| env::var("PLAN_TARGET").unwrap());
+            let (os, format) = if triple.contains("windows") { ("windows", "coff") } else { ("linux", "elf") };
+            println!("{{\"triple\":{},\"os\":{},\"object_format\":{},\"hosted\":true,\"supported\":true}}", quote(&triple), quote(os), quote(format));
+        }
         return;
     }
     if args.iter().any(|arg| arg == "--dry-run") {
@@ -50,9 +64,15 @@ impl Fixture {
             ID.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("vex.ws"), "{name=\"app\",version=0.1.0}").unwrap();
+        fs::write(root.join("vex.ws"), "{name=\"app\",version=0.1.0,lib=true}").unwrap();
+        fs::write(root.join("src/lib.wave"), "fun main() {}\n").unwrap();
         fs::write(root.join("src/main.wave"), "fun main() {}\n").unwrap();
         Self { root }
+    }
+    fn shared() -> Self {
+        let fixture = Self::new();
+        fs::write(fixture.root.join("vex.ws"), "{format=2,name=\"app\",version=0.1.0,lib=true,native={output=\"shared\",exports=[\"wave_add\"]}}").unwrap();
+        fixture
     }
     fn command(&self, plan: &Value, outputs: &[&str]) -> Command {
         static COMPILER: OnceLock<PathBuf> = OnceLock::new();
@@ -77,6 +97,7 @@ impl Fixture {
             .current_dir(&self.root)
             .env("VEX_WAVEC", compiler)
             .env("PLAN", plan.to_string())
+            .env("PLAN_TARGET", plan["target"].as_str().unwrap())
             .env("OUTPUTS", outputs.join("\n"))
             .env("NO_COLOR", "1");
         command
@@ -111,7 +132,10 @@ impl Drop for Fixture {
 }
 
 fn plan(outputs: &[&str]) -> Value {
-    json!({"schema_version":1,"mode":"build","target":"x86_64-unknown-linux-gnu","emit":"obj","emit_kinds":["obj"],"control_mode":null,"forced_input_type":null,"inputs":[{"path":"src/main.wave","kind":"wave"}],"emit_jobs":[],"compile":outputs.iter().map(|output| json!({"input":"src/main.wave","kind":"wave","output":output,"command":"compiler"})).collect::<Vec<_>>(),"link":null,"execute":null})
+    json!({"schema_version":1,"mode":"build","target":"x86_64-unknown-linux-gnu","emit":"obj","emit_kinds":["obj"],"control_mode":null,"forced_input_type":null,"inputs":[{"path":"src/lib.wave","kind":"wave"}],"emit_jobs":[],"compile":outputs.iter().map(|output| json!({"input":"src/lib.wave","kind":"wave","output":output,"command":"compiler"})).collect::<Vec<_>>(),"link":null,"execute":null})
+}
+fn plan_object(output: &str) -> Value {
+    plan(&[output])
 }
 fn assert_code(output: &Output, code: i32) {
     assert_eq!(
@@ -126,25 +150,35 @@ fn assert_code(output: &Output, code: i32) {
 fn unknown_and_modified_outputs_are_rejected_before_compiler_execution() {
     for modified in [false, true] {
         let f = Fixture::new();
-        let plan = plan(&["target/result.o"]);
+        let plan = plan(&["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]);
         if modified {
-            assert_code(&f.build(&plan, &["target/result.o"]), 0);
+            assert_code(
+                &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+                0,
+            );
             fs::remove_file(f.root.join("compiled")).unwrap();
         } else {
-            fs::create_dir(f.root.join("target")).unwrap();
+            fs::create_dir_all(f.root.join("target/x86_64-unknown-linux-gnu/dev/lib")).unwrap();
         }
-        fs::write(f.root.join("target/result.o"), b"user content").unwrap();
+        fs::write(
+            f.root.join("target/x86_64-unknown-linux-gnu/dev/lib/app.o"),
+            b"user content",
+        )
+        .unwrap();
         let registry = fs::read(f.root.join(".vex/artifacts.json")).ok();
-        assert_code(&f.build(&plan, &["target/result.o"]), 5);
+        assert_code(
+            &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+            5,
+        );
         assert!(!f.root.join("compiled").exists());
         assert_eq!(
-            fs::read(f.root.join("target/result.o")).unwrap(),
+            fs::read(f.root.join("target/x86_64-unknown-linux-gnu/dev/lib/app.o")).unwrap(),
             b"user content"
         );
         assert_eq!(fs::read(f.root.join(".vex/artifacts.json")).ok(), registry);
         f.clean();
         assert_eq!(
-            fs::read(f.root.join("target/result.o")).unwrap(),
+            fs::read(f.root.join("target/x86_64-unknown-linux-gnu/dev/lib/app.o")).unwrap(),
             b"user content"
         );
     }
@@ -153,36 +187,59 @@ fn unknown_and_modified_outputs_are_rejected_before_compiler_execution() {
 #[test]
 fn unchanged_owned_outputs_can_be_rebuilt_and_cleaned() {
     let f = Fixture::new();
-    let plan = plan(&["target/result.o"]);
+    let plan = plan(&["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]);
     for _ in 0..2 {
-        assert_code(&f.build(&plan, &["target/result.o"]), 0);
+        assert_code(
+            &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+            0,
+        );
     }
     f.clean();
-    assert!(!f.root.join("target/result.o").exists());
+    assert!(!f
+        .root
+        .join("target/x86_64-unknown-linux-gnu/dev/lib/app.o")
+        .exists());
 }
 
 #[test]
 fn missing_or_nonregular_outputs_do_not_publish_artifact_success() {
-    for directory in [false, true] {
-        let f = Fixture::new();
-        let plan = plan(&["target/result.o", "target/partial.o"]);
-        let mut command = f.command(&plan, &["target/partial.o"]);
-        if directory {
-            command.env("DIRECTORY_OUTPUT", "1");
-        }
-        let output = command
-            .args(["--message-file", "messages.jsonl", "build"])
-            .output()
-            .unwrap();
-        assert_code(&output, 4);
-        let events = f.events();
-        assert!(!events.iter().any(|event| event["event"] == "artifact"));
-        assert_eq!(events.last().unwrap()["category"], "compiler");
-        if !directory {
-            f.clean();
-            assert!(!f.root.join("target/partial.o").exists());
-        }
-    }
+    // A real linked plan has both its intermediate and final image as required
+    // outputs. Producing only the intermediate must not report success.
+    let f = Fixture::shared();
+    let plan = shared_plan(false);
+    let intermediate = plan["compile"][0]["output"].as_str().unwrap();
+    let output = f
+        .command(&plan, &[intermediate])
+        .args(["--message-file", "messages.jsonl", "build"])
+        .output()
+        .unwrap();
+    assert_code(&output, 4);
+    assert!(
+        f.root.join("compiled").exists(),
+        "fixture must reach compilation"
+    );
+    assert!(!f.events().iter().any(|event| event["event"] == "artifact"));
+    assert_eq!(f.events().last().unwrap()["category"], "compiler");
+    assert!(f.root.join(intermediate).is_file());
+    f.clean();
+    assert!(!f.root.join(intermediate).exists());
+
+    let f = Fixture::new();
+    let path = "target/x86_64-unknown-linux-gnu/dev/lib/app.o";
+    let output = f
+        .command(&plan_object(path), &[path])
+        .env("DIRECTORY_OUTPUT", "1")
+        .args(["--message-file", "messages.jsonl", "build"])
+        .output()
+        .unwrap();
+    assert_code(&output, 4);
+    assert!(
+        f.root.join("compiled").exists(),
+        "fixture must reach compilation"
+    );
+    assert!(f.root.join(path).is_dir());
+    assert!(!f.events().iter().any(|event| event["event"] == "artifact"));
+    assert_eq!(f.events().last().unwrap()["category"], "compiler");
 }
 
 #[test]
@@ -190,7 +247,10 @@ fn ownership_failure_preserves_primary_compiler_error_and_structured_context() {
     for (compiler_code, expected) in [(1, 4), (3, 5), (0, 5)] {
         let f = Fixture::new();
         let output = f
-            .command(&plan(&["target/result.o"]), &["target/result.o"])
+            .command(
+                &plan(&["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+                &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"],
+            )
             .args(["--message-file", "messages.jsonl", "build"])
             .env("COMPILE_EXIT", compiler_code.to_string())
             .env("FAIL_OWNERSHIP", "1")
@@ -236,22 +296,38 @@ fn escaping_duplicate_and_overlapping_outputs_fail_before_execution() {
 #[test]
 fn direct_input_and_final_output_aliases_are_rejected() {
     let f = Fixture::new();
-    let mut plan = plan(&["target/result.o"]);
-    assert_code(&f.build(&plan, &["target/result.o"]), 0);
+    let mut plan = plan(&["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]);
+    assert_code(
+        &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+        0,
+    );
     fs::remove_file(f.root.join("compiled")).unwrap();
-    plan["inputs"][0]["path"] = json!("target/result.o");
-    assert_code(&f.build(&plan, &["target/result.o"]), 4);
+    plan["inputs"][0]["path"] = json!("target/x86_64-unknown-linux-gnu/dev/lib/app.o");
+    assert_code(
+        &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+        4,
+    );
     assert!(!f.root.join("compiled").exists());
 }
 
 #[test]
 fn hard_links_to_owned_outputs_are_not_overwritten() {
     let f = Fixture::new();
-    let plan = plan(&["target/result.o"]);
-    assert_code(&f.build(&plan, &["target/result.o"]), 0);
+    let plan = plan(&["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]);
+    assert_code(
+        &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+        0,
+    );
     fs::remove_file(f.root.join("compiled")).unwrap();
-    fs::hard_link(f.root.join("target/result.o"), f.root.join("preserve.o")).unwrap();
-    assert_code(&f.build(&plan, &["target/result.o"]), 5);
+    fs::hard_link(
+        f.root.join("target/x86_64-unknown-linux-gnu/dev/lib/app.o"),
+        f.root.join("preserve.o"),
+    )
+    .unwrap();
+    assert_code(
+        &f.build(&plan, &["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+        5,
+    );
     assert!(!f.root.join("compiled").exists());
     assert_eq!(
         fs::read(f.root.join("preserve.o")).unwrap(),
@@ -259,22 +335,36 @@ fn hard_links_to_owned_outputs_are_not_overwritten() {
     );
 }
 
-fn msvc_plan() -> Value {
-    let mut plan = plan(&["target/native/input.o"]);
-    plan["target"] = json!("x86_64-pc-windows-msvc");
+fn shared_plan(windows: bool) -> Value {
+    let triple = if windows {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    let intermediate = format!("target/{triple}/dev/.vex-obj/lib/app/shared/input.o");
+    let output = format!(
+        "target/{triple}/dev/lib/{}",
+        if windows { "app.dll" } else { "libapp.so" }
+    );
+    let mut plan = plan(&[&intermediate]);
+    plan["target"] = json!(triple);
     plan["emit"] = json!("bin");
-    plan["link"] = json!({"output":"target/native/answer.dll","inputs":["target/native/input.o"],"program":"lld-link","args":["/OUT:target/native/answer.dll","/DLL"]});
+    plan["emit_kinds"] = json!(["bin"]);
+    plan["link"] = json!({"output":output,"inputs":[intermediate],"program":"fixture linker","args":if windows { vec![format!("/OUT:{output}"), "/DLL".into()] } else { vec![] }});
     plan
+}
+fn msvc_plan() -> Value {
+    shared_plan(true)
 }
 
 #[test]
 fn optional_msvc_companions_are_reported_and_cleaned_only_when_produced() {
-    let f = Fixture::new();
+    let f = Fixture::shared();
     let outputs = [
-        "target/native/input.o",
-        "target/native/answer.dll",
-        "target/native/answer.lib",
-        "target/native/answer.exp",
+        "target/x86_64-pc-windows-msvc/dev/.vex-obj/lib/app/shared/input.o",
+        "target/x86_64-pc-windows-msvc/dev/lib/app.dll",
+        "target/x86_64-pc-windows-msvc/dev/lib/app.lib",
+        "target/x86_64-pc-windows-msvc/dev/lib/app.exp",
     ];
     let output = f
         .command(&msvc_plan(), &outputs)
@@ -301,27 +391,29 @@ fn optional_msvc_companions_are_reported_and_cleaned_only_when_produced() {
 #[test]
 fn optional_msvc_output_collisions_and_unowned_files_are_protected() {
     for sidecar in [
-        "answer.lib",
-        "answer.exp",
-        "answer.pdb",
-        "answer.ilk",
-        "answer.map",
-        "answer.dll.manifest",
+        "app.lib",
+        "app.exp",
+        "app.pdb",
+        "app.ilk",
+        "app.map",
+        "app.dll.manifest",
     ] {
-        let f = Fixture::new();
-        fs::create_dir_all(f.root.join("target/native")).unwrap();
-        let path = f.root.join("target/native").join(sidecar);
+        let f = Fixture::shared();
+        fs::create_dir_all(f.root.join("target/x86_64-pc-windows-msvc/dev/lib")).unwrap();
+        let path = f
+            .root
+            .join("target/x86_64-pc-windows-msvc/dev/lib")
+            .join(sidecar);
         fs::write(&path, "user content").unwrap();
         assert_code(&f.build(&msvc_plan(), &[]), 5);
         assert!(!f.root.join("compiled").exists());
         assert_eq!(fs::read(path).unwrap(), b"user content");
     }
-    let f = Fixture::new();
+    let f = Fixture::shared();
     let mut plan = msvc_plan();
-    plan["link"]["args"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!("/PDB:target/native/input.o"));
+    plan["link"]["args"].as_array_mut().unwrap().push(json!(
+        "/PDB:target/x86_64-pc-windows-msvc/dev/.vex-obj/lib/app/shared/input.o"
+    ));
     assert_code(&f.build(&plan, &[]), 4);
     assert!(!f.root.join("compiled").exists());
 }
@@ -375,12 +467,48 @@ fn windows_trailing_dot_and_alternate_stream_destinations_are_rejected() {
 fn symlink_destinations_are_rejected_before_compilation() {
     use std::os::unix::fs::symlink;
     let f = Fixture::new();
-    fs::create_dir(f.root.join("target")).unwrap();
-    symlink(f.root.join("src/main.wave"), f.root.join("target/result.o")).unwrap();
-    assert_code(&f.build(&plan(&["target/result.o"]), &[]), 4);
+    fs::create_dir_all(f.root.join("target/x86_64-unknown-linux-gnu/dev/lib")).unwrap();
+    symlink(
+        f.root.join("src/main.wave"),
+        f.root.join("target/x86_64-unknown-linux-gnu/dev/lib/app.o"),
+    )
+    .unwrap();
+    assert_code(
+        &f.build(
+            &plan(&["target/x86_64-unknown-linux-gnu/dev/lib/app.o"]),
+            &[],
+        ),
+        4,
+    );
     assert!(!f.root.join("compiled").exists());
     assert_eq!(
         fs::read(f.root.join("src/main.wave")).unwrap(),
         b"fun main() {}\n"
     );
+}
+
+#[test]
+fn compiler_cannot_change_selected_artifact_kind_or_namespace() {
+    let f = Fixture::new();
+    assert_code(&f.build(&plan(&["target/ignored-selection.o"]), &[]), 4);
+    assert!(!f.root.join("compiled").exists());
+
+    let f = Fixture::shared();
+    let object_instead_of_shared = plan(&["target/x86_64-unknown-linux-gnu/dev/lib/libapp.so"]);
+    assert_code(&f.build(&object_instead_of_shared, &[]), 4);
+    assert!(!f.root.join("compiled").exists());
+
+    let f = Fixture::new();
+    let mut linked_instead_of_object = shared_plan(false);
+    linked_instead_of_object["link"]["output"] =
+        json!("target/x86_64-unknown-linux-gnu/dev/lib/app.o");
+    assert_code(&f.build(&linked_instead_of_object, &[]), 4);
+    assert!(!f.root.join("compiled").exists());
+
+    let f = Fixture::shared();
+    let mut escaped_intermediate = shared_plan(false);
+    escaped_intermediate["compile"][0]["output"] = json!("target/another-package.o");
+    escaped_intermediate["link"]["inputs"] = json!(["target/another-package.o"]);
+    assert_code(&f.build(&escaped_intermediate, &[]), 4);
+    assert!(!f.root.join("compiled").exists());
 }

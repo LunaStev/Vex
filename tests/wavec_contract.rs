@@ -111,6 +111,7 @@ fn vex_uses_path_and_override_wavec_and_rejects_unknown_schema() {
         fs::read_to_string(schema_log)
             .expect("schema log must exist")
             .lines()
+            .filter(|line| line.contains(" build "))
             .count(),
         1,
         "Vex must not execute a real build after incompatible dry-run output"
@@ -200,7 +201,10 @@ fn compile_fake_wavec(root: &Path) -> PathBuf {
 
 fn assert_contract_invocations(log: &Path) {
     let lines = fs::read_to_string(log).expect("fake wavec log must exist");
-    let lines = lines.lines().collect::<Vec<_>>();
+    let lines = lines
+        .lines()
+        .filter(|line| line.contains(" build "))
+        .collect::<Vec<_>>();
     assert_eq!(
         lines.len(),
         2,
@@ -274,7 +278,7 @@ fn capability_preflight_rejects_targets_before_state_and_queries_once_per_invoca
         assert_success(&out, command);
     }
     let logged = fs::read_to_string(log).unwrap();
-    assert_eq!(logged.lines().count(), 6);
+    assert_eq!(logged.lines().count(), 8);
     assert_eq!(
         logged
             .lines()
@@ -362,8 +366,18 @@ fn runtime_arguments_and_cwd_survive_project_selection_and_dry_run_is_single_jso
         .unwrap();
     assert_success(&out, "dry run");
     let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(plan["execute"]["args"], serde_json::json!(runtime));
-    assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+    assert_eq!(
+        plan["plans"][0]["compiler_plan"]["execute"]["args"],
+        serde_json::json!(runtime)
+    );
+    assert_eq!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(" build "))
+            .count(),
+        1
+    );
     assert_eq!(before, fs::read(project.join("vex.lock")).unwrap());
     assert!(!project.join("target/.vex-run/planned").exists());
 }

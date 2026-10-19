@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::ui;
-use compiler::{run_build_with_dry_run, Compiler};
+use compiler::{prepare_build, Compiler};
 use manifest::Manifest;
+use manifest::{PackageTarget, TargetKind};
 use resolver::{resolve_validated, ResolveOptions, UpdatePolicy};
+use serde_json::json;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuildMode {
@@ -19,6 +21,9 @@ pub enum BuildMode {
 struct VexBuildOptions {
     target: Option<String>,
     release: bool,
+    profile: Option<String>,
+    library: bool,
+    binaries: Vec<String>,
     dry_run: bool,
     locked: bool,
     offline: bool,
@@ -39,8 +44,7 @@ pub fn build(
     let compiler = Compiler::select();
     let _project = selection.enter()?;
     let manifest = Manifest::load()?;
-    let mut compiler = compiler?;
-    run_build(mode, &manifest, options, runtime, &mut compiler, messages)
+    run_build(mode, &manifest, options, runtime, compiler, messages)
 }
 
 fn run_build(
@@ -48,49 +52,34 @@ fn run_build(
     manifest: &Manifest,
     options: VexBuildOptions,
     runtime: &[std::ffi::OsString],
-    compiler: &mut Compiler,
+    compiler: Result<Compiler, Error>,
     messages: &mut Messages,
 ) -> Result<Outcome, Error> {
     let started = Instant::now();
-    std::env::current_dir()
-        .map_err(Error::environment)?
-        .to_str()
-        .ok_or_else(|| {
-            Error::resolution("wavec JSON protocol cannot represent a non-UTF-8 project root")
-        })?;
-    if let Some(target) = &options.target {
+    let root = std::env::current_dir().map_err(Error::environment)?;
+    root.to_str().ok_or_else(|| {
+        Error::resolution("wavec JSON protocol cannot represent a non-UTF-8 project root")
+    })?;
+    let selected = select_targets(manifest, mode, &options)?;
+    let profile_name =
+        options
+            .profile
+            .as_deref()
+            .unwrap_or(if options.release { "release" } else { "dev" });
+    let profile = manifest.profile(profile_name).map_err(Error::resolution)?;
+    for target in &selected {
+        validate_entry(manifest, target)?;
+    }
+    let mut selected_compiler = compiler?;
+    let compiler = &mut selected_compiler;
+    let requested_triple = options
+        .target
+        .as_deref()
+        .or(manifest.build_target.as_deref());
+    if let Some(target) = requested_triple {
         compiler.validate_target(target)?;
     }
     compiler.validate_version(manifest.compiler.as_deref())?;
-    ui::verbose(format!(
-        "target: {}",
-        options.target.as_deref().unwrap_or("compiler host default")
-    ));
-    ui::verbose(format!("compiler: {}", compiler.path().display()));
-    ui::trace(format!(
-        "build options: {options:?}; compiler plan is queried for this invocation"
-    ));
-    let default_input = resolve_default_input(manifest, mode)?;
-
-    let mut global_args = Vec::new();
-    if options.release {
-        global_args.push("-O2".to_string());
-    }
-    if let Some(target) = options.target.as_ref() {
-        global_args.push("--target".to_string());
-        global_args.push(target.clone());
-    }
-
-    let mut build_args = vec![default_input];
-    match mode {
-        BuildMode::Build => {}
-        BuildMode::Run => build_args.push("--run".to_string()),
-        BuildMode::Check => build_args.push("--emit=check".to_string()),
-    }
-    if options.dry_run {
-        build_args.push("--dry-run".to_string());
-    }
-
     let resolution = resolve_validated(
         manifest,
         ResolveOptions {
@@ -102,103 +91,277 @@ fn run_build(
         ui::status,
         |candidate| compiler.validate_version(candidate.compiler.as_deref()),
     )?;
-
+    let spec = compiler.target_spec(requested_triple)?;
+    let triple = spec["triple"].as_str().unwrap().to_owned();
+    ui::verbose(format!("target: {triple}"));
+    ui::verbose(format!("compiler: {}", compiler.path().display()));
+    ui::trace(format!(
+        "build options: {options:?}; compiler plan is queried for each selected package target"
+    ));
     ui::verbose(format!(
         "resolved {} dependencies",
         resolution.package_count()
     ));
+    if mode == BuildMode::Run
+        && !runtime.is_empty()
+        && spec["object_format"] == "wasm"
+        && spec["hosted"] == false
+    {
+        return Err(Error::resolution(
+            "bare WebAssembly has no process argument ABI; use a WASI target for program arguments",
+        ));
+    }
     let mut run_lease = None;
     let generation = if mode == BuildMode::Run {
-        let path = if options.dry_run {
+        Some(if options.dry_run {
             PathBuf::from("target/.vex-run/planned")
         } else {
             let path = compiler::create_run_generation()?;
-            let root = std::env::current_dir().map_err(Error::environment)?;
             run_lease =
                 Some(state::artifacts::RunLease::create(&root, &path).map_err(Error::environment)?);
             path
-        };
-        build_args.push(format!("--target-dir={}", path.display()));
-        Some(path)
+        })
     } else {
         None
     };
-    if let Some(native) = crate::native::prepare(
-        manifest,
-        &resolution,
-        compiler,
-        options.target.as_deref(),
-        options.release,
-        mode == BuildMode::Check,
-        generation.as_deref(),
-    )? {
-        // Native preparation supplies one canonical target and owns all output
-        // paths, including run-generation intermediates.
-        global_args.retain(|arg| arg != "--target");
-        if let Some(target) = &options.target {
-            global_args.retain(|arg| arg != target);
-        }
-        global_args.extend(native.global);
-        build_args.retain(|arg| !arg.starts_with("--target-dir="));
-        build_args.extend(native.inputs);
-        build_args.extend(native.output);
-    }
-    let mut wavec_args = Vec::new();
-    wavec_args.extend(resolution.dependency_args()?);
-    wavec_args.extend(global_args);
-    wavec_args.push("build".to_string());
-    wavec_args.extend(build_args);
-
-    ui::verbose(if options.dry_run {
-        "freshness: planning only; compiler will not execute"
-    } else {
-        "freshness: no build cache; compiling the current project"
-    });
-    let package = format!("{} v{}", manifest.name, manifest.version);
-    if options.dry_run {
-        ui::status("Planning", &package);
-    } else {
-        ui::status(
-            match mode {
-                BuildMode::Check => "Checking",
-                BuildMode::Build | BuildMode::Run => "Compiling",
-            },
-            &package,
-        );
-    }
-
-    messages.status("compiler")?;
+    let mut prepared = Vec::new();
     let reporting = messages.enabled();
-    let mut report = |event| messages.emit(event);
-    let execution = run_build_with_dry_run(
-        compiler,
-        &wavec_args,
-        runtime,
-        options.dry_run,
-        generation.as_deref(),
-        if reporting { Some(&mut report) } else { None },
-    )?;
+    messages.status("compiler")?;
+    for target in &selected {
+        let configuration = crate::native::prepare_target(
+            manifest,
+            target,
+            &resolution,
+            compiler,
+            &triple,
+            profile_name,
+            mode == BuildMode::Check,
+            generation.as_deref(),
+        )?;
+        let mut args = resolution.dependency_args()?;
+        if target.kind == TargetKind::Binary && manifest.lib {
+            args.push(format!("--dep={}={}", manifest.name, root.display()));
+        }
+        args.push(format!("-O{}", profile.opt_level));
+        args.extend(configuration.global);
+        args.push("build".into());
+        args.push(input_string(&target.path)?);
+        if mode == BuildMode::Run {
+            args.push("--run".into());
+        }
+        if mode == BuildMode::Check {
+            args.push("--emit=check".into());
+        }
+        args.extend(configuration.inputs);
+        args.extend(configuration.output);
+        let identity = json!({"name":target.name,"kind":target.kind.as_str()});
+        let mut report = |mut event: serde_json::Value| {
+            event["package_target"] = identity.clone();
+            event["profile"] = json!(profile_name);
+            messages.emit(event)
+        };
+        let plan = prepare_build(
+            compiler,
+            &args,
+            runtime,
+            options.dry_run,
+            generation.as_deref(),
+            if reporting { Some(&mut report) } else { None },
+        )
+        .map_err(|e| target_error(e, target, profile_name))?;
+        prepared.push((*target, plan));
+    }
+    // Even optional linker companions must be disjoint between package targets.
+    let paths = prepared
+        .iter()
+        .flat_map(|(_, p)| p.output_paths().cloned())
+        .collect::<Vec<_>>();
+    state::artifacts::validate_output_paths(&root, &paths).map_err(Error::compiler)?;
+    if options.dry_run {
+        ui::verbose("freshness: planning only; compiler will not execute");
+        for (target, _) in &prepared {
+            ui::status(
+                "Planning",
+                format!("{} {}", target.kind.as_str(), target.name),
+            );
+        }
+        let plans = prepared
+            .iter()
+            .map(|(target, plan)| {
+                json!({
+                    "package_target":{"name":target.name,"kind":target.kind.as_str()},
+                    "compiler_plan":plan.plan()
+                })
+            })
+            .collect::<Vec<_>>();
+        let envelope = json!({"schema":"vex.build-plan","schema_version":1,"target":triple,
+            "profile":{"name":profile_name,"opt_level":profile.opt_level},"plans":plans});
+        diagnostic::outln!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(Error::internal)?
+        );
+        return Ok(Outcome::success());
+    }
+    for (target, plan) in &prepared {
+        plan.preflight_ownership()
+            .map_err(|e| target_error(e, target, profile_name))?;
+    }
+    ui::verbose("freshness: no build cache; compiling the current project");
+    let mut execution = None;
+    for (target, plan) in prepared {
+        ui::status(
+            if mode == BuildMode::Check {
+                "Checking"
+            } else {
+                "Compiling"
+            },
+            format!(
+                "{} v{} ({} {})",
+                manifest.name,
+                manifest.version,
+                target.kind.as_str(),
+                target.name
+            ),
+        );
+        let final_paths = if let Some(path) = plan.plan()["link"]["output"].as_str() {
+            vec![path.to_owned()]
+        } else {
+            plan.plan()["compile"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|job| job["output"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let identity = json!({"name":target.name,"kind":target.kind.as_str()});
+        let artifact_kind = target.output.map(|v| v.as_str()).unwrap_or("binary");
+        let mut report = |mut event: serde_json::Value| {
+            event["package_target"] = identity.clone();
+            event["profile"] = json!(profile_name);
+            if event["event"] == "artifact" {
+                event["artifact_kind"] = json!(artifact_kind);
+            }
+            messages.emit(event)
+        };
+        execution = plan
+            .execute(compiler, if reporting { Some(&mut report) } else { None })
+            .map_err(|e| target_error(e, target, profile_name))?;
+        for path in final_paths {
+            ui::status("Artifact", path);
+        }
+    }
     drop(resolution);
     let mut outcome = Outcome::success();
     if let Some(execution) = execution {
-        ui::status("Running", &manifest.name);
+        ui::status("Running", &selected[0].name);
         messages.status("running")?;
-        let status = execution.execute()?;
-        outcome = Outcome::program(status);
+        outcome = Outcome::program(execution.execute()?);
     }
-
     drop(run_lease);
-    if !options.dry_run && outcome.code == 0 {
+    if outcome.code == 0 {
         ui::status(
             "Finished",
             format!(
-                "{} profile in {:.2}s",
-                if options.release { "release" } else { "dev" },
+                "{profile_name} profile in {:.2}s",
                 started.elapsed().as_secs_f64()
             ),
         );
     }
     Ok(outcome)
+}
+
+fn target_error(error: Error, target: &PackageTarget, profile: &str) -> Error {
+    error
+        .with_field(
+            "package_target",
+            format!("{}:{}", target.kind.as_str(), target.name),
+        )
+        .with_field("profile", profile)
+}
+
+fn select_targets<'a>(
+    manifest: &'a Manifest,
+    mode: BuildMode,
+    options: &VexBuildOptions,
+) -> Result<Vec<&'a PackageTarget>, Error> {
+    let binaries = manifest
+        .targets
+        .iter()
+        .filter(|t| t.kind == TargetKind::Binary)
+        .collect::<Vec<_>>();
+    if mode == BuildMode::Run {
+        if options.library {
+            return Err(Error::usage("vex run requires a binary; --lib is invalid"));
+        }
+        if options.binaries.len() > 1 {
+            return Err(Error::usage("vex run selects exactly one binary"));
+        }
+        let name = options
+            .binaries
+            .first()
+            .map(String::as_str)
+            .or(manifest.default_run.as_deref());
+        return if let Some(name) = name {
+            binaries
+                .into_iter()
+                .find(|t| t.name == name)
+                .map(|t| vec![t])
+                .ok_or_else(|| Error::resolution(format!("unknown binary target `{name}`")))
+        } else if binaries.len() == 1 {
+            Ok(binaries)
+        } else if binaries.is_empty() {
+            Err(Error::resolution(
+                "library packages cannot be run; select a package with a binary target",
+            ))
+        } else {
+            Err(Error::resolution(
+                "multiple binary targets; select one with --bin <name> or set default_run",
+            ))
+        };
+    }
+    for name in &options.binaries {
+        if !binaries.iter().any(|t| t.name == *name) {
+            return Err(Error::resolution(format!("unknown binary target `{name}`")));
+        }
+    }
+    if options.library && !manifest.lib {
+        return Err(Error::resolution("package has no library target"));
+    }
+    let all = !options.library && options.binaries.is_empty();
+    let mut targets = manifest
+        .targets
+        .iter()
+        .filter(|t| {
+            all || match t.kind {
+                TargetKind::Library => options.library,
+                TargetKind::Binary => options.binaries.contains(&t.name),
+            }
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by_key(|t| (t.kind != TargetKind::Library, &t.name));
+    Ok(targets)
+}
+
+pub(crate) fn validate_entry(manifest: &Manifest, target: &PackageTarget) -> Result<(), Error> {
+    let path = &target.path;
+    if !path.is_file() {
+        return Err(Error::resolution(format!(
+            "missing canonical package entry `{}` for {} `{}`",
+            path.display(),
+            target.kind.as_str(),
+            target.name
+        )));
+    }
+    if manifest.format == 3 {
+        let root = std::env::current_dir().map_err(Error::environment)?;
+        let actual = path.canonicalize().map_err(Error::environment)?;
+        if !actual.starts_with(root) {
+            return Err(Error::resolution(
+                "package target entry escapes its package directory",
+            ));
+        }
+    }
+    input_string(path).map(|_| ())
 }
 
 fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildOptions, String> {
@@ -214,7 +377,7 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
                     "runtime arguments after `--` are only valid with `vex run`".to_string()
                 );
             }
-            return Ok(options);
+            break;
         }
 
         match token {
@@ -225,7 +388,30 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
                 }
                 set_target(&mut options, &args[i])?;
             }
-            "--release" => options.release = true,
+            "--release" => {
+                if options.release {
+                    return Err("--release may only be specified once".into());
+                }
+                options.release = true;
+            }
+            "--profile" | "--bin" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .filter(|s| !s.is_empty() && !s.starts_with('-'))
+                    .ok_or_else(|| format!("missing value for `{token}`"))?;
+                set_selection(&mut options, token, value)?;
+            }
+            "--lib" => {
+                if options.library {
+                    return Err("--lib may only be specified once".into());
+                }
+                options.library = true;
+            }
+            _ if token.starts_with("--profile=") => {
+                set_selection(&mut options, "--profile", &token[10..])?
+            }
+            _ if token.starts_with("--bin=") => set_selection(&mut options, "--bin", &token[6..])?,
             "--dry-run" => options.dry_run = true,
             "--locked" => options.locked = true,
             "--offline" => options.offline = true,
@@ -248,7 +434,33 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
         i += 1;
     }
 
+    if options.release && options.profile.is_some() {
+        return Err("--release and --profile select the same setting; use only one".into());
+    }
+    if mode == BuildMode::Run && (options.library || options.binaries.len() > 1) {
+        return Err(
+            "vex run selects one binary with --bin; --lib and multiple binaries are invalid".into(),
+        );
+    }
     Ok(options)
+}
+
+fn set_selection(options: &mut VexBuildOptions, option: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() || value.starts_with('-') {
+        return Err(format!("missing value for `{option}`"));
+    }
+    if option == "--profile" {
+        if options.profile.is_some() {
+            return Err("--profile may only be specified once".into());
+        }
+        options.profile = Some(value.into());
+    } else {
+        if options.binaries.iter().any(|name| name == value) {
+            return Err(format!("duplicate binary selection `{value}`"));
+        }
+        options.binaries.push(value.into());
+    }
+    Ok(())
 }
 
 fn set_target(options: &mut VexBuildOptions, target: &str) -> Result<(), String> {
@@ -278,33 +490,15 @@ fn set_target(options: &mut VexBuildOptions, target: &str) -> Result<(), String>
 fn build_usage(mode: BuildMode) -> &'static str {
     match mode {
         BuildMode::Build => {
-            "usage: vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]"
+            "usage: vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline]"
         }
         BuildMode::Run => {
-            "usage: vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]"
+            "usage: vex run [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline] [-- <args...>]"
         }
         BuildMode::Check => {
-            "usage: vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]"
+            "usage: vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline]"
         }
     }
-}
-
-fn resolve_default_input(manifest: &Manifest, mode: BuildMode) -> Result<String, Error> {
-    if mode == BuildMode::Run && manifest.lib {
-        return Err(Error::resolution(
-            "library packages cannot be run; use a binary package with src/main.wave.".to_string(),
-        ));
-    }
-
-    let preferred = manifest.default_entry_path();
-    if preferred.is_file() {
-        return input_string(&preferred);
-    }
-
-    Err(Error::resolution(format!(
-        "missing canonical package entry `{}`\nhelp: create this file; Vex does not select arbitrary .wave files",
-        preferred.display()
-    )))
 }
 
 fn input_string(path: &Path) -> Result<String, Error> {

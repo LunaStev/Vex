@@ -242,18 +242,20 @@ fn print_help() -> Result<(), diagnostic::Error> {
     );
     diagnostic::outln!("  vex init [--lib]");
     diagnostic::outln!(
-        "  vex build [--target <triple>] [--release] [--dry-run] [--locked] [--offline]"
+        "  vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]"
     );
     diagnostic::outln!(
-        "  vex run [--target <triple>] [--release] [--dry-run] [--locked] [--offline] [-- <args...>]"
+        "  vex run [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]"
     );
     diagnostic::outln!(
-        "  vex check [--target <triple>] [--release] [--dry-run] [--locked] [--offline]"
+        "  vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]"
     );
     diagnostic::outln!("  vex fetch [--locked] [--offline]");
     diagnostic::outln!("  vex update [<package>...]");
     diagnostic::outln!("  vex info");
-    diagnostic::outln!("  vex metadata [--format=json] [--locked] [--offline]");
+    diagnostic::outln!(
+        "  vex metadata [--format=json] [--format-version <1|2>] [--locked] [--offline]"
+    );
     diagnostic::outln!("  vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]");
     diagnostic::outln!("  vex clean [--dry-run]");
     diagnostic::outln!("  vex prune [--apply] [--dry-run]");

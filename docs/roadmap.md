@@ -20,10 +20,16 @@ have independent OS leases; there is no automatic GC. Prune defaults to preview
 and requires `--apply` for deletion. Recovery transactions, transaction backups
 and prior compiler installations remain outside deletion scope.
 
+The current target/profile work (#46/#47/#48/#54) adds manifest format 3,
+explicit library and binary targets, unified artifact paths, root profiles and
+exact-triple platform settings. Metadata schema 2 describes these declarations;
+dry-run uses a Vex build-plan envelope. See [the contract](targets-and-profiles.md)
+for compatibility details. Acceptance follows the checks for this source commit.
+
 ## Separate designs
 
-User workspaces (#30), shared caches (#29), multiple package targets and profiles
-(#46/#47/#48), manifest editing (#28), build fingerprints (#59), package version
+User workspaces (#30), shared caches (#29), manifest editing (#28), build
+fingerprints (#59), package version
 ranges (#132/#51), optional dependencies, registry and publish remain separate
 product work. Implemented project discovery, metadata, lockfile v3, source
 credential handling, project leases, isolated run generations and atomic init

@@ -1,6 +1,6 @@
 use compiler::Compiler;
 use diagnostic::Error;
-use manifest::Manifest;
+use manifest::{Manifest, TargetKind};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -144,6 +144,22 @@ pub fn doctor(args: &[String], selection: &crate::project::Selection) -> Result<
             None
         }
     };
+    let project = select_project(selection).and_then(|project| {
+        project
+            .map(|project| {
+                let path = path_text(&project.manifest_path)?;
+                let manifest = Manifest::load()?;
+                Ok((project, path, manifest))
+            })
+            .transpose()
+    });
+    let target = target.or_else(|| {
+        project
+            .as_ref()
+            .ok()
+            .and_then(|project| project.as_ref())
+            .and_then(|(_, _, manifest)| manifest.build_target.clone())
+    });
     let mut compatible_target = false;
     if let Some(compiler) = compiler.as_mut() {
         match compiler.supported_targets() {
@@ -200,39 +216,20 @@ pub fn doctor(args: &[String], selection: &crate::project::Selection) -> Result<
             Value::Null,
         );
     }
-    match select_project(selection) {
-        Ok(Some(project)) => {
-            match path_text(&project.manifest_path)
-                .and_then(|path| Manifest::load().map(|manifest| (path, manifest)))
-            {
-                Ok((path, manifest)) => {
-                    report.check(
-                        "project",
-                        "ok",
-                        false,
-                        &format!("{} at {path}", manifest.name),
-                        json!({"manifest_path":path, "name":manifest.name}),
-                    );
-                    inspect_project(
-                        &mut report,
-                        &manifest,
-                        compiler.as_mut(),
-                        compatible_target,
-                        target.as_deref(),
-                        &host,
-                    );
-                }
-                Err(error) => {
-                    report.failure("project", error);
-                    report.check(
-                        "dry_run",
-                        "not_checked",
-                        false,
-                        "project manifest is invalid",
-                        Value::Null,
-                    );
-                }
-            }
+    match project {
+        Ok(Some((_project, path, manifest))) => {
+            report.check(
+                "project", "ok", false, &format!("{} at {path}", manifest.name),
+                json!({"manifest_path":path, "name":manifest.name, "manifest_format":manifest.format}),
+            );
+            inspect_project(
+                &mut report,
+                &manifest,
+                compiler.as_mut(),
+                compatible_target,
+                target.as_deref(),
+                &host,
+            );
         }
         Ok(None) => {
             report.check(
@@ -256,7 +253,7 @@ pub fn doctor(args: &[String], selection: &crate::project::Selection) -> Result<
                 "dry_run",
                 "not_checked",
                 false,
-                "project selection failed",
+                "project selection or manifest loading failed",
                 Value::Null,
             );
         }
@@ -462,20 +459,21 @@ fn inspect_project(
             Err(error) => report.failure("project_compiler", error),
         }
     }
-    let input = manifest.default_entry_path();
-    if !input.is_file() {
-        report.failure(
-            "entry",
-            Error::resolution(format!(
-                "missing canonical package entry `{}`",
-                input.display()
-            )),
-        );
+    let mut targets = manifest.targets.iter().collect::<Vec<_>>();
+    targets.sort_by_key(|target| (target.kind != TargetKind::Library, &target.name));
+    let mut missing_entry = false;
+    for package_target in &targets {
+        if let Err(error) = super::build::validate_entry(manifest, package_target) {
+            report.failure("entry", error);
+            missing_entry = true;
+        }
+    }
+    if missing_entry {
         report.check(
             "dry_run",
             "not_checked",
             false,
-            "canonical project input is unavailable",
+            "a declared package input is unavailable",
             Value::Null,
         );
         return;
@@ -514,7 +512,8 @@ fn inspect_project(
         );
         return;
     };
-    let result = (|| {
+    let profile = &manifest.profiles["dev"];
+    let prerequisite = (|| {
         for package in resolution.packages() {
             let directory = match &package.source {
                 lockfile::LockedSource::Path { resolved, .. }
@@ -523,91 +522,110 @@ fn inspect_project(
             let manifest = Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?;
             compiler.validate_version(manifest.compiler.as_deref())?;
         }
-        let mut args = resolution.dependency_args()?;
-        let native =
-            crate::native::prepare(manifest, &resolution, compiler, target, false, false, None)?;
-        if let Some(native) = &native {
-            args.extend(native.global.clone());
-        } else if let Some(target) = target {
-            args.extend(["--target".into(), target.into()]);
+        let spec = compiler.target_spec(target)?;
+        Ok(spec["triple"].as_str().unwrap().to_owned())
+    })();
+    let triple = match prerequisite {
+        Ok(triple) => triple,
+        Err(error) => {
+            planning_failure(report, error, target, host);
+            return;
         }
-        args.extend([
-            "build".into(),
-            path_text(&input)?,
-            "--dry-run".into(),
-            "--error-format=json".into(),
-        ]);
-        if let Some(native) = native {
+    };
+    let mut planned_paths = Vec::new();
+    for package_target in targets {
+        let result = (|| {
+            let native = crate::native::prepare_target(
+                manifest,
+                package_target,
+                &resolution,
+                compiler,
+                &triple,
+                "dev",
+                false,
+                None,
+            )?;
+            let mut args = resolution.dependency_args()?;
+            if package_target.kind == TargetKind::Binary && manifest.lib {
+                let root = std::env::current_dir().map_err(Error::environment)?;
+                args.push(format!("--dep={}={}", manifest.name, path_text(&root)?));
+            }
+            args.push(format!("-O{}", profile.opt_level));
+            args.extend(native.global);
+            args.extend(["build".into(), path_text(&package_target.path)?]);
             args.extend(native.inputs);
             args.extend(native.output);
-        }
-        let output = process::output(
-            Command::new(compiler.path())
-                .args(&args)
-                .env("NO_COLOR", "1"),
-            Duration::from_secs(60),
-        )
-        .map_err(Error::environment)?;
-        if !output.status.success() {
-            let message = format!(
-                "wavec dry-run failed: {}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Err(if output.status.code() == Some(3) {
-                Error::environment(message)
-            } else {
-                Error::compiler(message)
-            });
-        }
-        let plan = compiler::validate_plan(&output.stdout).map_err(Error::compiler)?;
-        let root = std::env::current_dir().map_err(Error::environment)?;
-        compiler::validate_plan_outputs(&plan, &root, &args)?;
-        Ok(plan)
-    })();
-    match result {
-        Ok(plan) => {
-            report.check(
-                "dry_run",
-                "ok",
-                true,
-                "compiler dry-run schema v1 and output paths are valid; compilation and linking were not executed",
-                json!({"schema_version":plan["schema_version"], "target":plan["target"]}),
-            );
-            if let Some(program) = plan["link"]["program"].as_str() {
-                match find_tool(Path::new(program)).and_then(|path| path_text(&path)) {
-                    Ok(path) => report.check("linker", "ok", false, &format!("planned linker is available at {path}; actual link support was not tested"), json!({"path":path})),
-                    Err(error) if target.is_some_and(|t| !host.iter().any(|h| h == t)) =>
-                        report.check("linker", "warning", false, &format!("optional cross-target tool unavailable: {error}"), json!({"program":program})),
-                    Err(error) => report.failure("linker", error),
+            compiler::prepare_build(compiler, &args, &[], false, None, None)
+        })();
+        match result {
+            Ok(prepared) => {
+                let plan = prepared.plan();
+                planned_paths.extend(prepared.output_paths().cloned());
+                let identity =
+                    json!({"name":package_target.name, "kind":package_target.kind.as_str()});
+                report.check("dry_run", "ok", true,
+                    "compiler dry-run schema v1 and output paths are valid; compilation and linking were not executed",
+                    json!({"schema_version":plan["schema_version"], "target":plan["target"],
+                        "package_target":identity,"profile":"dev","opt_level":profile.opt_level}));
+                if let Some(program) = plan["link"]["program"].as_str() {
+                    match find_tool(Path::new(program)).and_then(|path| path_text(&path)) {
+                        Ok(path) => report.check("linker", "ok", false,
+                            &format!("planned linker is available at {path}; actual link support was not tested"),
+                            json!({"path":path,"package_target":identity})),
+                        Err(error) if target.is_some_and(|t| !host.iter().any(|h| h == t)) =>
+                            report.check("linker", "warning", false, &format!("optional cross-target tool unavailable: {error}"),
+                                json!({"program":program,"package_target":identity})),
+                        Err(error) => report.failure("linker", error),
+                    }
+                } else {
+                    report.check(
+                        "linker",
+                        "not_checked",
+                        false,
+                        "the dry-run plan does not require a linker",
+                        json!({"package_target":identity}),
+                    );
                 }
-            } else {
-                report.check(
-                    "linker",
-                    "not_checked",
-                    false,
-                    "the dry-run plan does not require a linker",
-                    Value::Null,
-                );
             }
+            Err(error) => planning_failure(
+                report,
+                error.context(format!(
+                    "{} `{}`",
+                    package_target.kind.as_str(),
+                    package_target.name
+                )),
+                target,
+                host,
+            ),
         }
-        Err(error)
-            if error.category == diagnostic::Category::Environment
-                && target.is_some_and(|t| !host.iter().any(|h| h == t)) =>
-        {
-            report.check(
-                "dry_run",
-                "warning",
-                false,
-                &format!("optional cross-target environment unavailable: {error}"),
-                json!({"category":error.category.name()}),
-            );
-        }
-        Err(error) => report.failure("dry_run", error),
+    }
+    if let Err(error) = std::env::current_dir()
+        .map_err(Error::environment)
+        .and_then(|root| {
+            state::artifacts::validate_output_paths(&root, &planned_paths).map_err(Error::compiler)
+        })
+    {
+        report.failure("output_paths", error);
     }
     // Keep resolution's shared lease alive through compiler planning so updates
     // cannot replace dependency source while the compiler reads it.
     drop(resolution);
+}
+
+fn planning_failure(report: &mut Report, error: Error, target: Option<&str>, host: &[String]) {
+    if error.category == diagnostic::Category::Environment
+        && target.is_some_and(|t| !host.iter().any(|h| h == t))
+    {
+        report.check(
+            "dry_run",
+            "warning",
+            false,
+            &format!("optional cross-target environment unavailable: {error}"),
+            json!({"category":error.category.name()}),
+        );
+    } else {
+        report.failure("dry_run", error);
+    }
 }
 
 #[cfg(test)]

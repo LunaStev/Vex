@@ -37,6 +37,7 @@ fn run_init(is_lib: bool) -> Result<(), Error> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| Error::resolution("project directory must have a UTF-8 package name"))?;
     validate_package_name(project_name).map_err(Error::resolution)?;
+    manifest::validate_target_name(project_name).map_err(Error::resolution)?;
     // Validate the name before creating even the coordination directory.
     let guard = state::Guard::acquire(false, crate::ui::status).map_err(Error::environment)?;
     resolver::recover_project(&guard, false)?;
