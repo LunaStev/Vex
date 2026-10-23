@@ -55,6 +55,7 @@ pub enum DependencySource {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Dependency {
+    pub subdir: Option<String>,
     pub name: String,
     pub version: Option<String>,
     pub source: DependencySource,

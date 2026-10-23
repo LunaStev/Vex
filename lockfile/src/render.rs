@@ -1,16 +1,17 @@
-use crate::{LockedPackage, LockedSource, Lockfile, LOCKFILE_VERSION};
+use crate::{LockedPackage, LockedSource, Lockfile};
 
 pub fn render_lockfile(lockfile: Lockfile) -> String {
+    let version = lockfile.version;
     let blocks = lockfile
         .packages
         .iter()
         .map(render_package)
         .collect::<Vec<_>>();
     if blocks.is_empty() {
-        return format!("{{\n    version = {LOCKFILE_VERSION},\n    package = []\n}}\n");
+        return format!("{{\n    version = {version},\n    package = []\n}}\n");
     }
     format!(
-        "{{\n    version = {LOCKFILE_VERSION},\n    package = [\n{}\n    ]\n}}\n",
+        "{{\n    version = {version},\n    package = [\n{}\n    ]\n}}\n",
         blocks.join(",\n")
     )
 }
@@ -51,6 +52,9 @@ fn render_package(package: &LockedPackage) -> String {
             fields.push(render_field("commit", commit));
             fields.push(render_field("resolved", &portable_path(resolved)));
         }
+    }
+    if let Some(subdir) = &package.subdir {
+        fields.push(render_field("subdir", subdir));
     }
     let dependencies = package
         .dependencies

@@ -22,16 +22,19 @@ const ROOT_FIELDS: &[&str] = &[
     "build",
     "target_config",
 ];
-const DEPENDENCY_FIELDS: &[&str] = &["name", "version", "path", "git", "branch", "tag", "rev"];
+const DEPENDENCY_FIELDS: &[&str] = &[
+    "name", "version", "path", "git", "branch", "tag", "rev", "subdir",
+];
 
 pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
-    let data = loads_versions(raw, "format", &[2, 3])
+    let data = loads_versions(raw, "format", &[2, 3, 4])
         .map_err(|e| format!("failed to parse manifest: {e}"))?;
     reject_unknown_fields(&data, ROOT_FIELDS, "manifest")?;
     let format = match data.get("format") {
         None | Some(WsonValue::Int(1)) => 1,
         Some(WsonValue::Int(2)) => 2,
         Some(WsonValue::Int(3)) => 3,
+        Some(WsonValue::Int(4)) => 4,
         _ => return Err("unsupported manifest format; expected 1 (legacy), 2 (escaped strings), or 3 (explicit targets)".into()),
     };
     if format < 3 {
@@ -51,7 +54,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
             "format 3 declares its library in `targets.lib`; root `lib` is not supported".into(),
         );
     }
-    if format == 3 {
+    if format >= 3 {
         if let Some(WsonValue::Object(native)) = data.get("native") {
             if native.contains_key("output") || native.contains_key("exports") {
                 return Err(
@@ -79,7 +82,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     };
     let compiler = parse_optional_string(data.get("compiler"), "compiler")?;
     let native = crate::native::parse(data.get("native"), lib)?;
-    let model = if format == 3 {
+    let model = if format >= 3 {
         crate::model::parse(&data, &name)?
     } else {
         crate::model::legacy(&name, lib, native.as_ref())
@@ -100,7 +103,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     let description = parse_optional_string(data.get("description"), "description")?;
     let author = parse_optional_string(data.get("author"), "author")?;
     let license = parse_optional_string(data.get("license"), "license")?;
-    let dependencies = parse_dependencies(data.get("dependencies"))?;
+    let dependencies = parse_dependencies(data.get("dependencies"), format)?;
 
     if let Some(dependency) = dependencies
         .iter()
@@ -140,7 +143,7 @@ fn parse_optional_string(value: Option<&WsonValue>, field: &str) -> Result<Optio
     }
 }
 
-fn parse_dependencies(value: Option<&WsonValue>) -> Result<Vec<Dependency>, String> {
+fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Dependency>, String> {
     let mut dependencies = Vec::new();
     let mut names = HashSet::new();
     let Some(WsonValue::Array(items)) = value else {
@@ -178,6 +181,16 @@ fn parse_dependencies(value: Option<&WsonValue>) -> Result<Vec<Dependency>, Stri
                     "dependency `{name}` field `{field}` must not be empty or whitespace-only"
                 ));
             }
+        }
+        let subdir = optional_string(object.get("subdir"), "dependency field `subdir`")?;
+        if let Some(value) = &subdir {
+            if format < 4 {
+                return Err("dependency subdir requires format = 4".into());
+            }
+            if git.is_none() {
+                return Err("subdir applies only to Git dependencies".into());
+            }
+            source::validate_subdir(value)?;
         }
         let version = match object.get("version") {
             Some(value) => Some(parse_version_string(value).ok_or_else(|| {
@@ -230,6 +243,7 @@ fn parse_dependencies(value: Option<&WsonValue>) -> Result<Vec<Dependency>, Stri
             }
         };
         dependencies.push(Dependency {
+            subdir,
             name,
             version,
             source,

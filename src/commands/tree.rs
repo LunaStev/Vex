@@ -264,8 +264,13 @@ fn package_label(package: &LockedPackage) -> String {
                 .or_else(|| rev.as_ref().map(|value| format!(" rev {value}")))
                 .unwrap_or_default();
             let short_commit = &commit[..commit.len().min(7)];
+            let subdir = package
+                .subdir
+                .as_ref()
+                .map(|p| format!(" subdir {p}"))
+                .unwrap_or_default();
             format!(
-                "{} v{} (git {}{reference} @ {short_commit})",
+                "{} v{} (git {}{reference}{subdir} @ {short_commit})",
                 package.name,
                 package.version,
                 source::identity(url)
@@ -282,6 +287,7 @@ mod tests {
 
     fn path_package(name: &str, version: &str, dependencies: &[&str]) -> LockedPackage {
         LockedPackage {
+            subdir: None,
             name: name.to_string(),
             version: version.to_string(),
             source: LockedSource::Path {
@@ -299,6 +305,7 @@ mod tests {
     fn renders_sources_commits_and_shared_dependencies() {
         let packages = vec![
             LockedPackage {
+                subdir: None,
                 name: "alpha".to_string(),
                 version: "1.0.0".to_string(),
                 source: LockedSource::Git {

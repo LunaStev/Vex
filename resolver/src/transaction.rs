@@ -407,7 +407,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-fn sync_tree(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_tree(path: &Path) -> Result<(), String> {
     let meta = fs::symlink_metadata(path).map_err(err)?;
     if meta.file_type().is_symlink() {
         return Ok(());

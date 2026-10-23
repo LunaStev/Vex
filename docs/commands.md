@@ -113,3 +113,5 @@ usage: vex prune [--apply] [--dry-run]
 ```text
 usage: vex setup wavec [--version <version>] [--script-fallback]
 ```
+
+`vex cache prune [--apply] [--dry-run]` previews or explicitly removes shared Git object caches. See [Git cache](git-cache.md).

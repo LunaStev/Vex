@@ -6,12 +6,14 @@ use lockfile::{
 };
 use manifest::Manifest;
 
+mod cache;
 mod git;
 mod graph;
 mod paths;
 mod prune;
 mod transaction;
 
+pub use cache::prune as prune_cache;
 pub use prune::{prune, PruneEntry, PruneReport};
 
 pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), Error> {
@@ -66,11 +68,7 @@ impl Resolution {
     pub fn dependency_args(&self) -> Result<Vec<String>, Error> {
         let mut args = vec!["--dep-root=.vex/deps".to_string()];
         for package in &self.packages {
-            let path = match &package.source {
-                LockedSource::Path { resolved, .. } | LockedSource::Git { resolved, .. } => {
-                    resolved
-                }
-            };
+            let path = package.directory();
             let path = path.to_str().ok_or_else(|| {
                 Error::resolution(format!(
                     "wavec JSON protocol cannot represent non-UTF-8 source path for `{}`",
@@ -245,7 +243,7 @@ fn resolve_guarded<F: FnMut(&str, String)>(
                 "`{LOCKFILE_NAME}` is required by `--locked`\nhelp: run `vex fetch` and commit `{LOCKFILE_NAME}`"
             ))
         })?;
-        if lockfile.version != 2 && lockfile.version != LOCKFILE_VERSION {
+        if lockfile.version != 2 && lockfile.version != 3 && lockfile.version != LOCKFILE_VERSION {
             return Err(Error::resolution(format!(
                 "`{LOCKFILE_NAME}` version {} cannot be used with `--locked`; expected version {LOCKFILE_VERSION}\nhelp: run `vex fetch` to regenerate the lockfile",
                 lockfile.version
@@ -312,8 +310,10 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         resolver.into_packages()
     };
     let resolved = Lockfile {
-        version: if (locked || dry_run) && existing.version == 2 {
-            2
+        version: if (locked || dry_run) && matches!(existing.version, 2 | 3) {
+            existing.version
+        } else if manifest.format < 4 {
+            3
         } else {
             LOCKFILE_VERSION
         },

@@ -9,7 +9,7 @@ pub use render::render_lockfile as encode;
 pub use store::{read_lockfile, write_lockfile};
 
 pub const LOCKFILE_NAME: &str = "vex.lock";
-pub const LOCKFILE_VERSION: i64 = 3;
+pub const LOCKFILE_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LockedSource {
@@ -29,6 +29,7 @@ pub enum LockedSource {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockedPackage {
+    pub subdir: Option<String>,
     pub name: String,
     pub version: String,
     pub source: LockedSource,
@@ -39,6 +40,16 @@ pub struct LockedPackage {
 pub struct Lockfile {
     pub version: i64,
     pub packages: Vec<LockedPackage>,
+}
+
+impl LockedPackage {
+    pub fn directory(&self) -> PathBuf {
+        let (LockedSource::Path { resolved, .. } | LockedSource::Git { resolved, .. }) =
+            &self.source;
+        self.subdir
+            .as_ref()
+            .map_or_else(|| resolved.clone(), |subdir| resolved.join(subdir))
+    }
 }
 
 impl Lockfile {
@@ -73,6 +84,7 @@ mod tests {
             version: LOCKFILE_VERSION,
             packages: vec![
                 LockedPackage {
+                    subdir: None,
                     name: "core".to_string(),
                     version: "1.0.0".to_string(),
                     source: LockedSource::Path {
@@ -82,6 +94,7 @@ mod tests {
                     dependencies: vec![],
                 },
                 LockedPackage {
+                    subdir: None,
                     name: "math".to_string(),
                     version: "1.2.3".to_string(),
                     source: LockedSource::Git {

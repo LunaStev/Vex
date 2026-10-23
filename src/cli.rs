@@ -186,6 +186,7 @@ fn dispatch(
         ));
     }
     match args[0].as_str() {
+        "cache" => crate::commands::cache::cache(&args[1..]).map(|()| Outcome::success()),
         "init" => init(&args[1..]).map(|()| Outcome::success()),
         "build" => build(BuildMode::Build, &args[1..], runtime, selection, messages),
         "run" => run_package(&args[1..], runtime, selection, messages),

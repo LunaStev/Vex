@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use wson::{loads, WsonMap, WsonValue};
+use wson::{loads_versions, WsonMap, WsonValue};
 
 use crate::{LockedPackage, LockedSource, Lockfile, LOCKFILE_NAME, LOCKFILE_VERSION};
 
@@ -10,8 +10,8 @@ pub fn parse_lockfile(raw: &str) -> Result<Lockfile, String> {
 }
 
 fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
-    let data =
-        loads(raw, "version", 3).map_err(|e| format!("failed to parse `{LOCKFILE_NAME}`: {e}"))?;
+    let data = loads_versions(raw, "version", &[3, 4])
+        .map_err(|e| format!("failed to parse `{LOCKFILE_NAME}`: {e}"))?;
     let version = match data.get("version") {
         Some(WsonValue::Int(value)) => *value,
         _ => {
@@ -27,7 +27,7 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
             packages: Vec::new(),
         });
     }
-    if version != 2 && version != LOCKFILE_VERSION {
+    if version != 2 && version != 3 && version != LOCKFILE_VERSION {
         return Err(format!(
             "unsupported `{LOCKFILE_NAME}` version `{version}`; expected `{LOCKFILE_VERSION}`"
         ));
@@ -37,7 +37,7 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
     let packages = match data.get("package") {
         Some(WsonValue::Array(items)) => items
             .iter()
-            .map(parse_package)
+            .map(|value| parse_package(value, version))
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => {
             return Err(format!(
@@ -53,7 +53,7 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
     Ok(normalized)
 }
 
-fn parse_package(value: &WsonValue) -> Result<LockedPackage, String> {
+fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, String> {
     let WsonValue::Object(object) = value else {
         return Err("lockfile package entry must be an object".to_string());
     };
@@ -76,6 +76,7 @@ fn parse_package(value: &WsonValue) -> Result<LockedPackage, String> {
             "version",
             "source",
             "git",
+            "subdir",
             "branch",
             "tag",
             "rev",
@@ -120,7 +121,15 @@ fn parse_package(value: &WsonValue) -> Result<LockedPackage, String> {
             ))
         }
     };
+    let subdir = optional_string(object, "subdir")?;
+    if let Some(value) = &subdir {
+        if lock_version < 4 {
+            return Err("subdir requires lockfile version 4".into());
+        }
+        source::validate_subdir(value)?;
+    }
     Ok(LockedPackage {
+        subdir,
         name,
         version,
         source,

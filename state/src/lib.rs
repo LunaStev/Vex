@@ -66,6 +66,25 @@ impl Guard {
     }
 }
 
+/// A persistent coordination inode, never an existence-based PID lock.
+/// Callers acquire the project lease before a cache lease, never in reverse.
+#[derive(Debug)]
+pub struct FileGuard(File);
+impl FileGuard {
+    pub fn exclusive(path: &Path, waiting: impl FnOnce()) -> Result<Self, String> {
+        reject_link(path)?;
+        let file = acquire_file(path, false, true, waiting).map_err(|e| e.to_string())?;
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("coordination path must be a regular file".into());
+        }
+        inherit(&file).map_err(|e| e.to_string())?;
+        Ok(Self(file))
+    }
+    pub fn sync(&self) -> Result<(), String> {
+        self.0.sync_all().map_err(|e| e.to_string())
+    }
+}
+
 pub fn reject_link(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {

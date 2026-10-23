@@ -410,7 +410,7 @@ pub(crate) fn command_in(destination: &Path) -> Command {
     command
 }
 
-fn command() -> Command {
+pub(crate) fn command() -> Command {
     let mut command = Command::new("git");
     command.args(["-c", "protocol.ext.allow=never"]);
     // Canonical checkout names plus transaction staging can exceed MAX_PATH
@@ -472,7 +472,7 @@ fn inject_failure(_action: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn run(command: &mut Command, action: &str) -> Result<(), Error> {
+pub(crate) fn run(command: &mut Command, action: &str) -> Result<(), Error> {
     inject_failure(action)?;
     let output = command
         .supervised_output()

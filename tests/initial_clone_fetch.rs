@@ -139,7 +139,7 @@ fn a_reference_missing_from_clone_is_fetched_before_reporting_resolution_failure
 }
 
 #[test]
-fn restoring_a_locked_unadvertised_object_still_uses_exact_fetch() {
+fn restoring_a_locked_unadvertised_object_reuses_the_cached_exact_object() {
     let fixture = Fixture::new();
     let (source, expected) = fixture.source("sha1");
     let app = fixture.0.join("app");
@@ -159,8 +159,8 @@ fn restoring_a_locked_unadvertised_object_still_uses_exact_fetch() {
 
     let (output, commands) = traced_vex(&app, &["fetch", "--locked"]);
     success(&output);
-    assert_commands(&commands, "clone", 1);
-    assert_commands(&commands, "fetch", 1);
+    assert_commands(&commands, "clone", 0);
+    assert_commands(&commands, "fetch", 0);
     assert_commands(&commands, "ls-remote", 0);
     assert_eq!(locked_commit(&app), expected);
     assert_eq!(fs::read(app.join("vex.lock")).unwrap(), lock);
@@ -250,9 +250,10 @@ fn traced_vex(app: &Path, args: &[&str]) -> (Output, Vec<String>) {
         .current_dir(app)
         .args(args)
         .env("GIT_TRACE2_EVENT", git_path(&trace))
+        .env("VEX_CACHE_HOME", app.join(".test-cache"))
         .output()
         .unwrap();
-    let commands = fs::read_to_string(&trace)
+    let events = fs::read_to_string(&trace)
         .unwrap_or_else(|error| {
             panic!(
                 "missing Git trace {}: {error}; stderr: {}",
@@ -262,6 +263,28 @@ fn traced_vex(app: &Path, args: &[&str]) -> (Output, Vec<String>) {
         })
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    // Count source acquisition, not local cache maintenance subprocesses.
+    let cache_sessions: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["event"] == "start"
+                && event["argv"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg.as_str().is_some_and(|arg| arg.contains(".test-cache")))
+                })
+        })
+        .filter_map(|event| event["sid"].as_str().map(str::to_owned))
+        .collect();
+    let commands = events
+        .into_iter()
+        .filter(|event| {
+            !cache_sessions.iter().any(|sid| {
+                event["sid"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with(sid))
+            })
+        })
         .filter(|event| event["event"] == "cmd_name")
         .map(|event| event["name"].as_str().unwrap().to_owned())
         .collect();

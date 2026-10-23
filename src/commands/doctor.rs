@@ -515,10 +515,7 @@ fn inspect_project(
     let profile = &manifest.profiles["dev"];
     let prerequisite = (|| {
         for package in resolution.packages() {
-            let directory = match &package.source {
-                lockfile::LockedSource::Path { resolved, .. }
-                | lockfile::LockedSource::Git { resolved, .. } => resolved,
-            };
+            let directory = package.directory();
             let manifest = Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?;
             compiler.validate_version(manifest.compiler.as_deref())?;
         }

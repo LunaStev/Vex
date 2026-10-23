@@ -122,10 +122,7 @@ fn named_library(
 fn manifests(root: &Manifest, resolution: &Resolution) -> Result<Vec<Manifest>, Error> {
     let mut values = BTreeMap::from([(root.name.clone(), root.clone())]);
     for package in resolution.packages() {
-        let directory = match &package.source {
-            lockfile::LockedSource::Git { resolved, .. }
-            | lockfile::LockedSource::Path { resolved, .. } => resolved,
-        };
+        let directory = package.directory();
         values.insert(
             package.name.clone(),
             Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?,

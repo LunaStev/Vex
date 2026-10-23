@@ -43,7 +43,7 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
     let resolution = resolver::inspect(&manifest, locked, crate::ui::status)?;
     let mut packages = Vec::new();
     for package in resolution.packages() {
-        let (resolved, source) = match &package.source {
+        let (_resolved, source) = match &package.source {
             LockedSource::Path {
                 requested,
                 resolved,
@@ -57,10 +57,13 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
                 resolved,
             } => (
                 resolved,
-                json!({"kind":"git", "url":source::identity(url), "branch":branch,"tag":tag,"rev":rev,"commit":commit}),
+                json!({"kind":"git", "url":source::identity(url), "branch":branch,"tag":tag,"rev":rev,"commit":commit,"subdir":package.subdir}),
             ),
         };
-        let directory = resolved.canonicalize().map_err(Error::environment)?;
+        let directory = package
+            .directory()
+            .canonicalize()
+            .map_err(Error::environment)?;
         let package_manifest_path = directory.join(manifest::MANIFEST_FILE);
         let package_manifest = Manifest::load_from(&package_manifest_path)?;
         let mut value = package_record(

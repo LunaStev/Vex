@@ -51,7 +51,13 @@ fn run_init(is_lib: bool) -> Result<(), Error> {
     };
     let mut files = vec![
         (source_name.as_str(), source_template.to_string()),
-        ("vex.lock", lockfile::encode(Lockfile::empty())),
+        (
+            "vex.lock",
+            lockfile::encode(Lockfile {
+                version: 3,
+                packages: Vec::new(),
+            }),
+        ),
     ];
     let created_ignore = fs::symlink_metadata(Path::new(".gitignore")).is_err();
     if created_ignore {

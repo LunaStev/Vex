@@ -59,7 +59,7 @@ pub fn prune(args: &[String], selection: &crate::project::Selection) -> Result<(
     }
     if report.removed > 0 {
         diagnostic::outln!(
-            "No shared cache is kept. Restoring a removed dependency requires `vex fetch` and access to its source."
+            "Restoring a removed dependency requires `vex fetch`; network access may be needed if its exact commit is not cached."
         );
     }
     Ok(())

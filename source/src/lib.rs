@@ -143,6 +143,23 @@ pub fn redact(message: &str) -> String {
     rendered
 }
 
+/// Portable repository-relative package selector. Dot/empty components and
+/// platform prefixes are rejected before touching a repository.
+pub fn validate_subdir(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.contains(['\\', ':', '\0'])
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(
+            "subdir must be a nonempty portable relative path without dot or empty components"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

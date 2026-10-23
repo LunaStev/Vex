@@ -22,6 +22,7 @@ pub(crate) struct Resolver<'a> {
     requests: HashMap<String, RequestKey>,
     request_origins: HashMap<String, (String, String)>,
     visiting: Vec<String>,
+    git_selections: HashMap<String, String>,
     status: &'a mut dyn FnMut(&str, String),
     validate: &'a mut dyn FnMut(&Manifest) -> Result<(), Error>,
 }
@@ -33,6 +34,7 @@ enum RequestKey {
         version: Option<String>,
     },
     Git {
+        subdir: Option<String>,
         url: String,
         branch: Option<String>,
         tag: Option<String>,
@@ -66,6 +68,7 @@ impl<'a> Resolver<'a> {
             requests: HashMap::new(),
             request_origins: HashMap::new(),
             visiting: Vec::new(),
+            git_selections: HashMap::new(),
             status,
             validate,
         }
@@ -224,6 +227,7 @@ impl<'a> Resolver<'a> {
                 tag,
                 rev,
             } => RequestKey::Git {
+                subdir: dependency.subdir.clone(),
                 url: source::identity(url),
                 branch: branch.clone(),
                 tag: tag.clone(),
@@ -432,6 +436,10 @@ impl<'a> Resolver<'a> {
                 } else {
                     self.resolve_git_commit(dependency, &destination)?
                 };
+                self.git_selections.insert(
+                    format!("{url:?}|{branch:?}|{tag:?}|{rev:?}"),
+                    commit.clone(),
+                );
                 git::reject_submodules(&destination, name, &commit)?;
                 let logical_destination = self.logical(&destination);
                 (self.status)(
@@ -454,6 +462,22 @@ impl<'a> Resolver<'a> {
             }
         };
 
+        let checkout_path = resolved_path.clone();
+        let resolved_path = if let Some(subdir) = &dependency.subdir {
+            let selected = resolved_path
+                .join(subdir)
+                .canonicalize()
+                .map_err(Error::resolution)?;
+            let repository = resolved_path.canonicalize().map_err(Error::resolution)?;
+            if !selected.starts_with(&repository) {
+                return Err(Error::resolution(
+                    "dependency subdir escapes its repository",
+                ));
+            }
+            selected
+        } else {
+            resolved_path
+        };
         let manifest_path = resolved_path.join(MANIFEST_FILE);
         let package_manifest = Manifest::load_from(&manifest_path).map_err(|e| {
             e.with_field("package", &dependency.name)
@@ -498,7 +522,7 @@ impl<'a> Resolver<'a> {
         if let Some(replace) = record_checkout {
             if let LockedSource::Git { url, commit, .. } = &locked_source {
                 crate::prune::record_checkout(
-                    &resolved_path,
+                    &checkout_path,
                     &dependency.name,
                     url,
                     commit,
@@ -507,9 +531,21 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        // Deletion ownership is deliberately stricter than source verification.
+        // A validated staged checkout still supplies immutable Git objects when
+        // prune must preserve its layout or user-created repository metadata.
+        if !self.options.dry_run && self.logical(&checkout_path) != checkout_path {
+            if let LockedSource::Git { url: _, commit, .. } = &locked_source {
+                if let DependencySource::Git { url, .. } = &dependency.source {
+                    crate::cache::store(&checkout_path, url, commit)?;
+                }
+            }
+        }
+
         self.packages.insert(
             dependency.name.clone(),
             LockedPackage {
+                subdir: dependency.subdir.clone(),
                 name: dependency.name.clone(),
                 version: package_manifest.version,
                 source: locked_source,
@@ -529,6 +565,13 @@ impl<'a> Resolver<'a> {
         else {
             return None;
         };
+        let selected = self
+            .git_selections
+            .get(&format!("{url:?}|{branch:?}|{tag:?}|{rev:?}"))
+            .cloned();
+        if !self.options.locked && !self.options.dry_run && selected.is_some() {
+            return selected;
+        }
         if !self.preflight && self.options.update.updates(&dependency.name) {
             None
         } else {
@@ -594,6 +637,20 @@ impl<'a> Resolver<'a> {
                 ),
             );
             return Ok(commit);
+        }
+
+        if let Some(commit) = &locked {
+            if (!destination.join(".git").exists() || !git::has_commit(destination, commit)?)
+                && crate::cache::restore(destination, url, commit)?
+            {
+                (self.status)(
+                    "Detail",
+                    format!(
+                        "{}: restored exact commit from shared cache without network",
+                        dependency.name
+                    ),
+                );
+            }
         }
 
         if self.options.offline {
