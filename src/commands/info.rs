@@ -49,10 +49,19 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
     diagnostic::outln!("dependencies: {}", manifest.dependencies.len());
 
     for dep in manifest.dependencies {
+        let alias = if dep.name != dep.package_name() {
+            format!("{} => {}", dep.name, dep.package_name())
+        } else {
+            dep.name.clone()
+        };
+        let label = dep
+            .version_req
+            .as_ref()
+            .map_or_else(|| alias.clone(), |req| format!("{alias} requires {req}"));
         match dep.source {
             DependencySource::Path { path } => match dep.version {
-                Some(version) => diagnostic::outln!("  {} {} path {}", dep.name, version, path),
-                None => diagnostic::outln!("  {} path {}", dep.name, path),
+                Some(version) => diagnostic::outln!("  {} {} path {}", label, version, path),
+                None => diagnostic::outln!("  {} path {}", label, path),
             },
             DependencySource::Git {
                 url,
@@ -69,7 +78,7 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
                     Some(version) => {
                         diagnostic::outln!(
                             "  {} {} git {}{}",
-                            dep.name,
+                            label,
                             version,
                             source::identity(&url),
                             reference
@@ -77,7 +86,7 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
                     }
                     None => diagnostic::outln!(
                         "  {} git {}{}",
-                        dep.name,
+                        label,
                         source::identity(&url),
                         reference
                     ),

@@ -30,10 +30,12 @@ pub(crate) struct Resolver<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RequestKey {
     Path {
+        package: String,
         resolved: PathBuf,
         version: Option<String>,
     },
     Git {
+        package: String,
         subdir: Option<String>,
         url: String,
         branch: Option<String>,
@@ -218,8 +220,13 @@ impl<'a> Resolver<'a> {
 
         let key = match &dependency.source {
             DependencySource::Path { path } => RequestKey::Path {
+                package: dependency.package_name().to_owned(),
                 resolved: self.logical(&self.resolve_path(path, parent_manifest)?),
-                version: dependency.version.clone(),
+                version: if dependency.modern {
+                    None
+                } else {
+                    dependency.version.clone()
+                },
             },
             DependencySource::Git {
                 url,
@@ -227,12 +234,17 @@ impl<'a> Resolver<'a> {
                 tag,
                 rev,
             } => RequestKey::Git {
+                package: dependency.package_name().to_owned(),
                 subdir: dependency.subdir.clone(),
                 url: source::identity(url),
                 branch: branch.clone(),
                 tag: tag.clone(),
                 rev: rev.clone(),
-                version: dependency.version.clone(),
+                version: if dependency.modern {
+                    None
+                } else {
+                    dependency.version.clone()
+                },
             },
         };
 
@@ -244,7 +256,7 @@ impl<'a> Resolver<'a> {
         if let Some(previous) = self.requests.get(&dependency.name) {
             if previous != &key {
                 return Err(Error::resolution(format!(
-                    "package name `{}` refers to more than one source or version requirement\nfirst: {} ({})\nsecond: {} ({})",
+                    "package name `{}` refers to more than one source or version requirement\nfirst: {} ({})\nsecond: {} ({})\nWave currently exposes a global import-name map; conflicting transitive aliases require scoped compiler dependency mappings",
                     dependency.name, self.request_origins[&dependency.name].0,
                     self.request_origins[&dependency.name].1, chain, parent_manifest.display()
                 )).with_field("first_dependency_path", &self.request_origins[&dependency.name].0)
@@ -253,6 +265,14 @@ impl<'a> Resolver<'a> {
                   .with_field("second_request", format!("{key:?}")));
             }
             if let Some(package) = self.packages.get_mut(&dependency.name) {
+                dependency.validate_version(&package.version).map_err(|e| {
+                    Error::resolution(e)
+                        .with_field(
+                            "first_dependency_path",
+                            &self.request_origins[&dependency.name].0,
+                        )
+                        .with_field("second_dependency_path", &chain)
+                })?;
                 if self.existing.package(&dependency.name).is_none() {
                     if let (LockedSource::Path { requested, .. }, DependencySource::Path { path }) =
                         (&mut package.source, &dependency.source)
@@ -483,7 +503,7 @@ impl<'a> Resolver<'a> {
             e.with_field("package", &dependency.name)
                 .with_field("operation", "load dependency manifest")
         })?;
-        if package_manifest.name != dependency.name {
+        if package_manifest.name != dependency.package_name() {
             return Err(Error::resolution(format!(
                 "dependency is named `{}` but `{}` declares package `{}`",
                 dependency.name,
@@ -506,14 +526,9 @@ impl<'a> Resolver<'a> {
                 library_entry.display()
             )));
         }
-        if let Some(required) = dependency.version.as_deref() {
-            if package_manifest.version != required {
-                return Err(Error::resolution(format!(
-                    "dependency `{}` requires version `{required}` but source contains version `{}`",
-                    dependency.name, package_manifest.version
-                )));
-            }
-        }
+        dependency
+            .validate_version(&package_manifest.version)
+            .map_err(|e| Error::resolution(e).with_field("dependency_path", &chain))?;
 
         self.visiting.push(dependency.name.clone());
         let dependencies = self.resolve_manifest_dependencies(&package_manifest)?;
@@ -545,6 +560,15 @@ impl<'a> Resolver<'a> {
         self.packages.insert(
             dependency.name.clone(),
             LockedPackage {
+                package: dependency.modern.then(|| package_manifest.name.clone()),
+                id: dependency.modern.then(|| {
+                    lockfile::package_identity(
+                        &package_manifest.name,
+                        &package_manifest.version,
+                        &locked_source,
+                        dependency.subdir.as_deref(),
+                    )
+                }),
                 subdir: dependency.subdir.clone(),
                 name: dependency.name.clone(),
                 version: package_manifest.version,
@@ -762,10 +786,12 @@ mod tests {
     #[test]
     fn path_identity_uses_resolved_location() {
         let first = RequestKey::Path {
+            package: "package".into(),
             resolved: PathBuf::from("/tmp/package"),
             version: Some("1.0.0".to_string()),
         };
         let second = RequestKey::Path {
+            package: "package".into(),
             resolved: PathBuf::from("/tmp/package"),
             version: Some("1.0.0".to_string()),
         };

@@ -118,6 +118,29 @@ def target_profile_smoke(vex, root, env, host_target):
     print("Format 3 targets, output layout, custom profiles, self-import and metadata passed.", flush=True)
 
 
+def package_identity_smoke(vex, root, env):
+    for directory, version, symbol, value in (("alias_one", "1.2.3", "old_value", 11), ("alias_two", "2.0.0", "new_value", 22)):
+        package = root / directory
+        (package / "src").mkdir(parents=True)
+        (package / "vex.ws").write_text(
+            '{format=4,name="math",version="' + version + '",targets={lib={}}}', encoding="utf-8")
+        (package / "src/lib.wave").write_text(
+            f"pub fun {symbol}() -> i32 {{ return {value}; }}\n", encoding="utf-8")
+    app = root / "alias_app"
+    (app / "src").mkdir(parents=True)
+    (app / "vex.ws").write_text(
+        '{format=4,name="app",targets={bins=[{name="app",path="src/main.wave"}]},dependencies=['
+        '{name="old_math",package="math",path="../alias_one",version_req="^1"},'
+        '{name="new_math",package="math",path="../alias_two",version_req="^2"}]}', encoding="utf-8")
+    (app / "src/main.wave").write_text(
+        'import("old_math")::{old_value};\nimport("new_math")::{new_value};\n'
+        'fun main() { println("{}", old_value() + new_value()); }\n', encoding="utf-8")
+    run([vex, "fetch"], app, env)
+    result = run([vex, "run", "--locked", "--offline"], app, env)
+    if result.stdout.strip() != "33":
+        raise RuntimeError("two package versions were not imported through their explicit aliases")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vex", type=Path, required=True)
@@ -168,6 +191,7 @@ def main():
             if command == "build":
                 host_target = plan["target"]
         target_profile_smoke(vex, root, env, host_target)
+        package_identity_smoke(vex, root, env)
         run([vex, "check", "--target", host_target, "--locked", "--offline"], nested, env)
         rejected = run([vex, "build", "--emit=obj"], app, env, succeeds=False)
         if "unknown Vex option" not in rejected.stderr:

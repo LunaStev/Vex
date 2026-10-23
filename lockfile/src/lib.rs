@@ -29,6 +29,9 @@ pub enum LockedSource {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LockedPackage {
+    /// Import binding, distinct from the declared package name.
+    pub package: Option<String>,
+    pub id: Option<String>,
     pub subdir: Option<String>,
     pub name: String,
     pub version: String,
@@ -43,6 +46,9 @@ pub struct Lockfile {
 }
 
 impl LockedPackage {
+    pub fn package_name(&self) -> &str {
+        self.package.as_deref().unwrap_or(&self.name)
+    }
     pub fn directory(&self) -> PathBuf {
         let (LockedSource::Path { resolved, .. } | LockedSource::Git { resolved, .. }) =
             &self.source;
@@ -74,6 +80,30 @@ impl Lockfile {
     }
 }
 
+pub fn package_identity(
+    name: &str,
+    version: &str,
+    source: &LockedSource,
+    subdir: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    // Concrete source identity excludes selectors and import aliases.
+    let identity = match source {
+        LockedSource::Path { resolved, .. } => {
+            #[cfg(windows)]
+            let path = resolved.to_string_lossy().replace('\\', "/");
+            #[cfg(not(windows))]
+            let path = resolved.to_string_lossy();
+            format!("path:{path}")
+        }
+        LockedSource::Git { url, commit, .. } => format!("git:{}@{commit}", source::identity(url)),
+    };
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{name:?}|{version:?}|{identity:?}|{subdir:?}").as_bytes())
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +114,8 @@ mod tests {
             version: LOCKFILE_VERSION,
             packages: vec![
                 LockedPackage {
+                    package: None,
+                    id: None,
                     subdir: None,
                     name: "core".to_string(),
                     version: "1.0.0".to_string(),
@@ -94,6 +126,8 @@ mod tests {
                     dependencies: vec![],
                 },
                 LockedPackage {
+                    package: None,
+                    id: None,
                     subdir: None,
                     name: "math".to_string(),
                     version: "1.2.3".to_string(),

@@ -55,6 +55,9 @@ pub enum DependencySource {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Dependency {
+    pub package: Option<String>,
+    pub version_req: Option<String>,
+    pub modern: bool,
     pub subdir: Option<String>,
     pub name: String,
     pub version: Option<String>,
@@ -79,6 +82,38 @@ pub struct Manifest {
     pub license: Option<String>,
     pub dependencies: Vec<Dependency>,
     pub source_path: PathBuf,
+}
+
+impl Dependency {
+    pub fn package_name(&self) -> &str {
+        self.package.as_deref().unwrap_or(&self.name)
+    }
+    pub fn validate_version(&self, found: &str) -> Result<(), String> {
+        if self
+            .version
+            .as_ref()
+            .is_some_and(|required| required != found)
+        {
+            return Err(format!(
+                "dependency `{}` requires version `{}` but source contains version `{found}`",
+                self.name,
+                self.version.as_ref().unwrap()
+            ));
+        }
+        if let Some(required) = &self.version_req {
+            let version = semver::Version::parse(found).map_err(|_| {
+                format!("dependency `{}` version `{found}` is not SemVer", self.name)
+            })?;
+            let requirement = semver::VersionReq::parse(required).map_err(|e| e.to_string())?;
+            if !requirement.matches(&version) {
+                return Err(format!(
+                    "dependency `{}` requires `{required}` but selected source contains `{found}`",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Manifest {
@@ -159,3 +194,5 @@ impl Manifest {
         platform
     }
 }
+
+mod versions;

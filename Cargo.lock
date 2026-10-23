@@ -408,6 +408,7 @@ name = "lockfile"
 version = "0.0.2-beta"
 dependencies = [
  "diagnostic",
+ "sha2",
  "source",
  "wson",
 ]

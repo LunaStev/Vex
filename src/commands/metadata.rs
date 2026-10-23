@@ -73,6 +73,10 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
             format_version,
         )?;
         value["source"] = source;
+        if package.id.is_some() {
+            value["id"] = json!(package.id);
+            value["alias"] = json!(package.name);
+        }
         let mut dependencies = package.dependencies.clone();
         dependencies.sort();
         value["dependencies"] = json!(dependencies);
@@ -102,7 +106,7 @@ fn parse_version(value: Option<&str>, selected: &mut Option<u32>) -> Result<(), 
 }
 
 fn require_single_target(manifest: &Manifest) -> Result<&PackageTarget, Error> {
-    if manifest.targets.len() != 1 {
+    if manifest.targets.len() != 1 || manifest.format >= 4 {
         return Err(Error::resolution(format!(
             "metadata schema 1 cannot represent the targets of package `{}`\nhelp: use `vex metadata --format-version 2`",
             manifest.name
@@ -127,6 +131,17 @@ fn package_record(
         "manifest_format":manifest.format, "compiler":manifest.compiler,
         "root":json_path(root)?, "manifest_path":json_path(manifest_path)?,
         "native":crate::native::configuration(manifest), "dependencies":dependencies});
+    if manifest.format >= 4 {
+        value["id"] = json!(lockfile::package_identity(
+            &manifest.name,
+            &manifest.version,
+            &LockedSource::Path {
+                requested: ".".into(),
+                resolved: ".".into()
+            },
+            None
+        ));
+    }
     if version == 1 {
         let target = require_single_target(manifest)?;
         value["kind"] = json!(kind_name(target.kind));

@@ -245,9 +245,14 @@ impl TreeRenderer<'_> {
 }
 
 fn package_label(package: &LockedPackage) -> String {
+    let name = if package.name != package.package_name() {
+        format!("{} => {}", package.name, package.package_name())
+    } else {
+        package.name.clone()
+    };
     match &package.source {
         LockedSource::Path { requested, .. } => {
-            format!("{} v{} (path {requested})", package.name, package.version)
+            format!("{} v{} (path {requested})", name, package.version)
         }
         LockedSource::Git {
             url,
@@ -271,7 +276,7 @@ fn package_label(package: &LockedPackage) -> String {
                 .unwrap_or_default();
             format!(
                 "{} v{} (git {}{reference}{subdir} @ {short_commit})",
-                package.name,
+                name,
                 package.version,
                 source::identity(url)
             )
@@ -287,6 +292,8 @@ mod tests {
 
     fn path_package(name: &str, version: &str, dependencies: &[&str]) -> LockedPackage {
         LockedPackage {
+            package: None,
+            id: None,
             subdir: None,
             name: name.to_string(),
             version: version.to_string(),
@@ -305,6 +312,8 @@ mod tests {
     fn renders_sources_commits_and_shared_dependencies() {
         let packages = vec![
             LockedPackage {
+                package: None,
+                id: None,
                 subdir: None,
                 name: "alpha".to_string(),
                 version: "1.0.0".to_string(),

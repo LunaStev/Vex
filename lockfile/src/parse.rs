@@ -65,6 +65,8 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
     let fields: &[&str] = match source.as_str() {
         "path" => &[
             "name",
+            "id",
+            "package",
             "version",
             "source",
             "path",
@@ -73,6 +75,8 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
         ],
         "git" => &[
             "name",
+            "id",
+            "package",
             "version",
             "source",
             "git",
@@ -121,6 +125,27 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
             ))
         }
     };
+    let package = optional_string(object, "package")?;
+    let id = optional_string(object, "id")?;
+    if (package.is_some() || id.is_some()) && lock_version < 4 {
+        return Err("package identity requires lockfile version 4".into());
+    }
+    if let Some(package) = &package {
+        if package.is_empty()
+            || !package
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || (i > 0 && b.is_ascii_digit()))
+        {
+            return Err("invalid package name in lockfile".into());
+        }
+    }
+    if id
+        .as_ref()
+        .is_some_and(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err("invalid package identity in lockfile".into());
+    }
     let subdir = optional_string(object, "subdir")?;
     if let Some(value) = &subdir {
         if lock_version < 4 {
@@ -129,6 +154,8 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
         source::validate_subdir(value)?;
     }
     Ok(LockedPackage {
+        package,
+        id,
         subdir,
         name,
         version,
@@ -151,6 +178,26 @@ fn reject_unknown_fields(object: &WsonMap, allowed: &[&str], context: &str) -> R
 fn validate_graph(lockfile: &Lockfile) -> Result<(), String> {
     let mut packages = BTreeMap::new();
     for package in &lockfile.packages {
+        if package.id.is_some() != package.package.is_some() {
+            return Err(
+                "lockfile package identity and declared package must appear together".into(),
+            );
+        }
+        if let Some(id) = &package.id {
+            if *id
+                != crate::package_identity(
+                    package.package_name(),
+                    &package.version,
+                    &package.source,
+                    package.subdir.as_deref(),
+                )
+            {
+                return Err(format!(
+                    "lockfile identity does not match source for `{}`",
+                    package.name
+                ));
+            }
+        }
         if packages.insert(package.name.as_str(), package).is_some() {
             return Err(format!(
                 "`{LOCKFILE_NAME}` contains duplicate package `{}`",

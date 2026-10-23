@@ -309,10 +309,14 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         resolver.validate_selected_packages()?;
         resolver.into_packages()
     };
+    let requires_v4 = manifest.format >= 4
+        || packages
+            .iter()
+            .any(|p| p.id.is_some() || p.subdir.is_some());
     let resolved = Lockfile {
-        version: if (locked || dry_run) && matches!(existing.version, 2 | 3) {
+        version: if !requires_v4 && (locked || dry_run) && matches!(existing.version, 2 | 3) {
             existing.version
-        } else if manifest.format < 4 {
+        } else if !requires_v4 {
             3
         } else {
             LOCKFILE_VERSION

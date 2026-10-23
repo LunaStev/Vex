@@ -21,6 +21,12 @@ fn render_package(package: &LockedPackage) -> String {
         render_field("name", &package.name),
         render_field("version", &package.version),
     ];
+    if let Some(name) = &package.package {
+        fields.push(render_field("package", name));
+    }
+    if let Some(id) = &package.id {
+        fields.push(render_field("id", id));
+    }
     match &package.source {
         LockedSource::Path {
             requested,

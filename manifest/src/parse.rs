@@ -23,7 +23,16 @@ const ROOT_FIELDS: &[&str] = &[
     "target_config",
 ];
 const DEPENDENCY_FIELDS: &[&str] = &[
-    "name", "version", "path", "git", "branch", "tag", "rev", "subdir",
+    "name",
+    "version",
+    "path",
+    "git",
+    "branch",
+    "tag",
+    "rev",
+    "subdir",
+    "package",
+    "version_req",
 ];
 
 pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
@@ -75,6 +84,13 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
             .ok_or_else(|| "manifest field `version` must be a version or string".to_string())?,
         None => "0.1.0".to_string(),
     };
+    if format >= 4 {
+        let parsed = semver::Version::parse(&version)
+            .map_err(|e| format!("format 4 package version must be SemVer: {e}"))?;
+        if parsed.to_string() != version {
+            return Err("package version must be canonical SemVer".into());
+        }
+    }
     let lib = match data.get("lib") {
         Some(WsonValue::Bool(value)) => *value,
         None => false,
@@ -164,6 +180,24 @@ fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Depe
             return Err(format!("dependency `{name}` is declared more than once"));
         }
 
+        let package = optional_string(object.get("package"), "dependency field `package`")?;
+        let version_req =
+            optional_string(object.get("version_req"), "dependency field `version_req`")?;
+        if package.is_some() || version_req.is_some() {
+            if format < 4 {
+                return Err("package aliases and version_req require format = 4".into());
+            }
+            if let Some(package) = &package {
+                crate::validate_package_name(package)?;
+            }
+            if let Some(required) = &version_req {
+                if object.contains_key("version") {
+                    return Err("dependency must not combine version and version_req".into());
+                }
+                semver::VersionReq::parse(required)
+                    .map_err(|e| format!("invalid version_req for `{name}`: {e}"))?;
+            }
+        }
         let path = optional_string(object.get("path"), "dependency field `path`")?;
         let git = optional_string(object.get("git"), "dependency field `git`")?;
         let branch = optional_string(object.get("branch"), "dependency field `branch`")?;
@@ -243,6 +277,9 @@ fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Depe
             }
         };
         dependencies.push(Dependency {
+            package,
+            version_req,
+            modern: format >= 4,
             subdir,
             name,
             version,

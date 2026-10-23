@@ -11,3 +11,4 @@ publish = false
 diagnostic.workspace = true
 source.workspace = true
 wson.workspace = true
+sha2 = "0.10"
