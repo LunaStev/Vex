@@ -1,4 +1,9 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
 use serde_json::{json, Value};
+mod support;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,14 +33,7 @@ fn compiler() -> &'static Path {
         } else {
             "target-wavec"
         });
-        let output = Command::new("rustc")
-            .args(["--edition=2021"])
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/target_wavec.rs"))
-            .arg("-o")
-            .arg(&compiler)
-            .output()
-            .unwrap();
-        code(&output, 0);
+        support::compile_fixture("target_wavec", &compiler);
         compiler
     })
 }

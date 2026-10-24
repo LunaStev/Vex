@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
 //! Manifest-owned native linking. Foreign sources and build scripts are never executed.
 use compiler::Compiler;
 use diagnostic::Error;
@@ -850,7 +854,8 @@ mod tests {
                 .category,
             diagnostic::Category::Environment
         );
-        assert!(Path::new(&linker_path(&root, "rustc").unwrap()).is_absolute());
+        // Git is available in target execution guests as well as build hosts.
+        assert!(Path::new(&linker_path(&root, "git").unwrap()).is_absolute());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

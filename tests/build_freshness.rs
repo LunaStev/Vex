@@ -1,4 +1,9 @@
 #![cfg(target_os = "linux")]
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -17,14 +22,7 @@ fn compiler() -> &'static Path {
         } else {
             "target-wavec"
         });
-        let out = Command::new("rustc")
-            .arg("--edition=2021")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/target_wavec.rs"))
-            .arg("-o")
-            .arg(&path)
-            .output()
-            .unwrap();
-        code(&out, 0);
+        support::compile_fixture("target_wavec", &path);
         path
     })
 }

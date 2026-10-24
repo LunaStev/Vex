@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
 //! A durable two-file edit. Uncommitted journals roll back, including after a crash.
 use crate::{atomic_rename, reject_link, sync_dir, Guard};
 use serde::{Deserialize, Serialize};

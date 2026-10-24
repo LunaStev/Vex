@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
 //! Token-aware WSON boundary shared by manifests and lockfiles.
 //! Legacy strings retain their backslashes; only explicitly versioned input
 //! decodes JSON escapes. The upstream parser is used for scalar literals only.

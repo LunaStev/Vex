@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // SPDX-License-Identifier: MPL-2.0
 
+mod support;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -188,14 +189,7 @@ fn compile_fake_wavec(root: &Path) -> PathBuf {
     } else {
         "fake-wavec"
     });
-    let compile = Command::new("rustc")
-        .args(["--edition=2021"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .expect("rustc for fake wavec must start");
-    assert_success(&compile, "compile fake wavec");
+    support::compile_fixture("fake_wavec", &binary);
     binary
 }
 

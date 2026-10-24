@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -1352,15 +1356,7 @@ fn fixture_compiler(root: &Path) -> PathBuf {
     let source = root.join("fake.rs");
     let binary = root.join(if cfg!(windows) { "wavec.exe" } else { "wavec" });
     fs::write(&source, include_str!("fixtures/fake_wavec.rs")).unwrap();
-    assert_success(
-        &Command::new("rustc")
-            .arg(&source)
-            .arg("-o")
-            .arg(&binary)
-            .output()
-            .unwrap(),
-        "compile fixture",
-    );
+    support::compile_fixture("fake_wavec", &binary);
     binary
 }
 
