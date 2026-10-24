@@ -57,6 +57,7 @@ pub enum DependencySource {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Dependency {
+    pub test_only: bool,
     pub binding_alias: Option<String>,
     pub target: Option<source::graph::Predicate>,
     pub optional: bool,
@@ -73,6 +74,7 @@ pub struct Dependency {
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
+    pub tests: Vec<PackageTarget>,
     pub workspace: Option<Workspace>,
     pub virtual_workspace: bool,
     pub scope: Option<WorkspaceContext>,
@@ -102,6 +104,7 @@ impl Dependency {
     }
     pub fn edge(&self, key: String) -> source::graph::Edge {
         source::graph::Edge {
+            development: self.test_only,
             key,
             alias: self.import_name().into(),
             optional: self.optional,

@@ -58,11 +58,17 @@ fn edges(package: &LockedPackage, packages: &BTreeMap<&str, &LockedPackage>) -> 
         .map(|key| Edge::unconditional(key.clone(), packages[key.as_str()].import_name().into()))
         .collect()
 }
-fn selected(edges: &[Edge], enabled: &BTreeSet<String>, target: &Context) -> Vec<Edge> {
+fn selected(
+    edges: &[Edge],
+    enabled: &BTreeSet<String>,
+    target: &Context,
+    tests: bool,
+) -> Vec<Edge> {
     edges
         .iter()
         .filter(|edge| {
-            edge.target.as_ref().is_none_or(|p| p.matches(target))
+            (!edge.development || tests)
+                && edge.target.as_ref().is_none_or(|p| p.matches(target))
                 && (!edge.optional || enabled.contains(&edge.alias))
         })
         .cloned()
@@ -146,7 +152,12 @@ pub(crate) fn select(
                 source::graph::expand(&root.features, &root.edges, &group.features, group.defaults)
                     .map_err(|e| Error::resolution(e).with_field("package", &root.name))?;
             parents.push((
-                selected(&root.edges, &expanded.enabled, context),
+                selected(
+                    &root.edges,
+                    &expanded.enabled,
+                    context,
+                    request.selection.include_tests,
+                ),
                 expanded.forwarded,
                 context.clone(),
             ));
@@ -163,7 +174,7 @@ pub(crate) fn select(
             )
             .map_err(|e| Error::resolution(e).with_field("package", package.package_name()))?;
             parents.push((
-                selected(&all_edges, &expanded.enabled, context),
+                selected(&all_edges, &expanded.enabled, context, false),
                 expanded.forwarded,
                 context.clone(),
             ));
@@ -194,7 +205,12 @@ pub(crate) fn select(
         let expanded =
             source::graph::expand(&root.features, &root.edges, &group.features, group.defaults)
                 .map_err(Error::resolution)?;
-        let root_edges = selected(&root.edges, &expanded.enabled, context);
+        let root_edges = selected(
+            &root.edges,
+            &expanded.enabled,
+            context,
+            request.selection.include_tests,
+        );
         let mut features = BTreeMap::from([(root_identity(root), expanded.features)]);
         let mut pending: Vec<_> = root_edges.iter().map(|edge| edge.key.clone()).collect();
         let mut seen = BTreeSet::new();
@@ -230,7 +246,7 @@ pub(crate) fn select(
             .map_err(Error::resolution)?;
             features.insert(id, expanded.features);
             let mut package = package.clone();
-            package.dependencies = selected(&all_edges, &expanded.enabled, context)
+            package.dependencies = selected(&all_edges, &expanded.enabled, context, false)
                 .into_iter()
                 .map(|e| e.key)
                 .collect::<BTreeSet<_>>()

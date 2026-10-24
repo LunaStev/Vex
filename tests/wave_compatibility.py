@@ -209,6 +209,24 @@ def workspace_smoke(vex, root, env):
         raise RuntimeError("workspace command wrote member state or changed its locked graph")
 
 
+def executable_test_smoke(vex, root, env):
+    helper = root / "test_helper"
+    (helper / "src").mkdir(parents=True)
+    (helper / "vex.ws").write_text('{format=4,name="helper",targets={lib={}}}', encoding="utf-8")
+    (helper / "src/lib.wave").write_text('pub fun value() -> i32 { return 42; }\n', encoding="utf-8")
+    app = root / "test_app"
+    (app / "tests").mkdir(parents=True)
+    (app / "vex.ws").write_text('{format=4,name="tests",targets={tests=[{name="smoke",path="tests/smoke.wave"}]},test_dependencies=[{name="helper",path="../test_helper"}]}', encoding="utf-8")
+    (app / "tests/smoke.wave").write_text('import("helper")::{value};\nfun main() { println("{}", value()); }\n', encoding="utf-8")
+    run([vex, "fetch"], app, env)
+    result = run([vex, "--message-file", "results.jsonl", "test", "--locked", "--offline"], app, env)
+    if result.stdout.strip() != "42":
+        raise RuntimeError("explicit test executable did not import its test dependency")
+    events = [json.loads(line) for line in (app / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+    if not any(event.get("event") == "test_result" and event.get("exit_code") == 0 for event in events):
+        raise RuntimeError("missing executable test result")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vex", type=Path, required=True)
@@ -263,6 +281,7 @@ def main():
         package_identity_smoke(vex, root, env)
         feature_graph_smoke(vex, root, env, host_target)
         workspace_smoke(vex, root, env)
+        executable_test_smoke(vex, root, env)
         run([vex, "check", "--target", host_target, "--locked", "--offline"], nested, env)
         rejected = run([vex, "build", "--emit=obj"], app, env, succeeds=False)
         if "unknown Vex option" not in rejected.stderr:

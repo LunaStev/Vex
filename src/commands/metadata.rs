@@ -246,6 +246,7 @@ fn package_record(
                 })
                 .collect::<Result<_, Error>>()?,
         );
+        value["tests"] = Value::Array(manifest.tests.iter().map(|target| Ok(json!({"name":target.name,"entry_path":json_path(&root.join(&target.path))?,"platform":platform_record(&target.platform)?}))).collect::<Result<_,Error>>()?);
         value["default_run"] = json!(manifest.default_run);
         value["profiles"] = json!(manifest
             .profiles

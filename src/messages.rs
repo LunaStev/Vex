@@ -112,6 +112,11 @@ impl Messages {
         }
         Ok(())
     }
+    pub fn program_event(&mut self, value: Value) {
+        if let Err(error) = self.emit(value) {
+            crate::ui::warning(error);
+        }
+    }
     pub fn status(&mut self, phase: &str) -> Result<(), Error> {
         self.emit(json!({"event":"status", "phase":phase}))
     }

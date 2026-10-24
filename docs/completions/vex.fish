@@ -8,6 +8,7 @@ complete -c vex -l features
 complete -c vex -l format-version
 complete -c vex -l format=json
 complete -c vex -l git
+complete -c vex -l include-tests
 complete -c vex -l invert
 complete -c vex -l lib
 complete -c vex -l locked
@@ -48,5 +49,6 @@ complete -c vex -f -a prune
 complete -c vex -f -a remove
 complete -c vex -f -a run
 complete -c vex -f -a setup
+complete -c vex -f -a test
 complete -c vex -f -a tree
 complete -c vex -f -a update

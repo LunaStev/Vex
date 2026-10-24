@@ -77,6 +77,8 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
                 .graph
                 .features
                 .extend(value.split(',').map(str::to_owned));
+        } else if arg == "--include-tests" {
+            selection.graph.include_tests = true;
         } else if arg == "--no-default-features" {
             if selection.graph.no_default_features {
                 return Err(Error::usage(
@@ -130,7 +132,8 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
         && !args.first().is_some_and(|s| {
             matches!(
                 s.as_str(),
-                "add"
+                "test"
+                    | "add"
                     | "remove"
                     | "build"
                     | "check"
@@ -148,10 +151,17 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
             "package selection requires a workspace project command",
         ));
     }
+    if selection.graph.include_tests
+        && !args
+            .first()
+            .is_some_and(|s| matches!(s.as_str(), "fetch" | "update" | "tree" | "metadata"))
+    {
+        return Err(Error::usage("--include-tests selects a dependency query graph; vex test includes tests automatically"));
+    }
     let graph_command = args.first().is_some_and(|s| {
         matches!(
             s.as_str(),
-            "build" | "check" | "run" | "fetch" | "update" | "tree" | "metadata"
+            "test" | "build" | "check" | "run" | "fetch" | "update" | "tree" | "metadata"
         )
     });
     if !graph_command
@@ -195,7 +205,7 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
     let command = args.first().map(String::as_str).unwrap_or("help");
     let dry_run = matches!(
         command,
-        "build" | "check" | "run" | "clean" | "prune" | "cache"
+        "test" | "build" | "check" | "run" | "clean" | "prune" | "cache"
     ) && args
         .iter()
         .skip(1)
@@ -282,7 +292,8 @@ fn dispatch(
     if selection.manifest_path.is_some()
         && !matches!(
             args[0].as_str(),
-            "add"
+            "test"
+                | "add"
                 | "remove"
                 | "build"
                 | "run"
@@ -317,6 +328,7 @@ fn dispatch(
         "manpage" => crate::command_spec::manpage(&args[1..]).map(|()| Outcome::success()),
         "cache" => crate::commands::cache::cache(&args[1..]).map(|()| Outcome::success()),
         "init" => init(&args[1..]).map(|()| Outcome::success()),
+        "test" => build(BuildMode::Test, &args[1..], runtime, selection, messages),
         "build" => build(BuildMode::Build, &args[1..], runtime, selection, messages),
         "run" => run_package(&args[1..], runtime, selection, messages),
         "check" => check(&args[1..], runtime, selection, messages),

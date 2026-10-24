@@ -42,6 +42,14 @@ fn main() {
         if let Some(directory) = env::var_os("TARGET_PROGRAM_EXPECT_CWD") {
             assert_eq!(env::current_dir().unwrap().canonicalize().unwrap(), PathBuf::from(directory).canonicalize().unwrap());
         }
+        let name=env::current_exe().unwrap().file_stem().unwrap().to_string_lossy().into_owned();
+        if let Some(log)=env::var_os("TARGET_PROGRAM_LOG") {
+            let mut file=fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+            writeln!(file,"{name}").unwrap();
+        }
+        if let Ok(codes)=env::var("TARGET_PROGRAM_EXIT_MAP") {
+            if let Some(code)=codes.split(',').find_map(|part|part.split_once('=').filter(|(key,_)|*key==name).map(|(_,value)|value.parse::<i32>().unwrap())) { env::set_var("TARGET_PROGRAM_EXIT",code.to_string()); }
+        }
         println!("TARGET_PROGRAM:{}", list(&args));
         if let Ok(vex) = env::var("TARGET_PROGRAM_CHECK_LOCK_RELEASE") {
             let status = std::process::Command::new(vex)

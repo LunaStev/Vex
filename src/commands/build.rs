@@ -15,6 +15,7 @@ pub enum BuildMode {
     Build,
     Run,
     Check,
+    Test,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -24,6 +25,7 @@ struct VexBuildOptions {
     profile: Option<String>,
     library: bool,
     binaries: Vec<String>,
+    filter: Option<String>,
     dry_run: bool,
     locked: bool,
     offline: bool,
@@ -72,8 +74,9 @@ fn run_build(
     runtime: &[std::ffi::OsString],
     compiler: Result<Compiler, Error>,
     messages: &mut Messages,
-    graph_selection: source::graph::Selection,
+    mut graph_selection: source::graph::Selection,
 ) -> Result<Outcome, Error> {
+    graph_selection.include_tests = mode == BuildMode::Test;
     let started = Instant::now();
     let root = std::env::current_dir().map_err(Error::environment)?;
     root.to_str().ok_or_else(|| {
@@ -93,6 +96,14 @@ fn run_build(
     }
     let mut members = Vec::new();
     for manifest in manifests {
+        if mode == BuildMode::Test
+            && !manifest
+                .tests
+                .iter()
+                .any(|t| options.filter.as_ref().is_none_or(|f| t.name.contains(f)))
+        {
+            continue;
+        }
         let mut local = options.clone();
         if manifests.len() > 1 {
             local.library &= manifest.lib;
@@ -122,6 +133,9 @@ fn run_build(
             manifest: manifest.clone(),
             targets,
         });
+    }
+    if mode == BuildMode::Test {
+        members.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
     }
     if members.is_empty() {
         return Err(Error::resolution("no package targets match the selection"));
@@ -204,7 +218,7 @@ fn run_build(
         "resolved {} dependency bindings",
         resolution.package_count()
     ));
-    if mode == BuildMode::Run
+    if matches!(mode, BuildMode::Run | BuildMode::Test)
         && !runtime.is_empty()
         && spec["object_format"] == "wasm"
         && spec["hosted"] == false
@@ -214,7 +228,7 @@ fn run_build(
         ));
     }
     let mut run_lease = None;
-    let generation = if mode == BuildMode::Run {
+    let generation = if matches!(mode, BuildMode::Run | BuildMode::Test) {
         Some(if options.dry_run {
             PathBuf::from("target/.vex-run/planned")
         } else {
@@ -272,7 +286,7 @@ fn run_build(
             args.extend(configuration.global);
             args.push("build".into());
             args.push(input_string(&target.path)?);
-            if mode == BuildMode::Run {
+            if matches!(mode, BuildMode::Run | BuildMode::Test) {
                 args.push("--run".into());
             }
             if mode == BuildMode::Check {
@@ -334,7 +348,7 @@ fn run_build(
             .map_err(|e| target_error(e, &task.target, profile_name))?;
     }
     ui::verbose("freshness: no build cache; compiling the current project");
-    let mut execution = None;
+    let mut executions = Vec::new();
     for task in prepared {
         ui::status(
             if mode == BuildMode::Check {
@@ -370,21 +384,46 @@ fn run_build(
             }
             messages.emit(event)
         };
-        execution = task
+        let execution = task
             .plan
             .execute(compiler, if reporting { Some(&mut report) } else { None })
             .map_err(|e| target_error(e, &task.target, profile_name))?
             .map(|execution| execution.in_directory(&task.directory));
+        if let Some(execution) = execution {
+            executions.push((task.package.clone(), task.target.name.clone(), execution));
+        }
         for path in final_paths {
             ui::status("Artifact", path);
         }
     }
     drop(resolution);
     let mut outcome = Outcome::success();
-    if let Some(execution) = execution {
-        ui::status("Running", &members[0].targets[0].name);
-        messages.status("running")?;
-        outcome = Outcome::program(execution.execute()?);
+    for (package, name, execution) in executions {
+        ui::status(
+            if mode == BuildMode::Test {
+                "Testing"
+            } else {
+                "Running"
+            },
+            &name,
+        );
+        if mode == BuildMode::Test && outcome.origin == "program" {
+            messages.program_event(json!({"event":"status","phase":"running"}));
+        } else {
+            messages.status("running")?;
+        }
+        let result = Outcome::program(execution.execute()?);
+        if mode == BuildMode::Test {
+            ui::result(format!(
+                "test {package}::{name} ... {} (exit {})",
+                if result.code == 0 { "ok" } else { "FAILED" },
+                result.code
+            ));
+            messages.program_event(json!({"event":"test_result","package":package,"test":name,"origin":"program","exit_code":result.code,"signal":result.signal,"success":result.code==0}));
+        }
+        if outcome.code == 0 {
+            outcome = result;
+        }
     }
     drop(run_lease);
     if outcome.code == 0 {
@@ -413,6 +452,25 @@ fn select_targets<'a>(
     mode: BuildMode,
     options: &VexBuildOptions,
 ) -> Result<Vec<&'a PackageTarget>, Error> {
+    if mode == BuildMode::Test {
+        let mut tests = manifest
+            .tests
+            .iter()
+            .filter(|target| {
+                options
+                    .filter
+                    .as_ref()
+                    .is_none_or(|filter| target.name.contains(filter))
+            })
+            .collect::<Vec<_>>();
+        tests.sort_by(|a, b| a.name.cmp(&b.name));
+        if tests.is_empty() {
+            return Err(Error::resolution(
+                "no executable tests match the name filter",
+            ));
+        }
+        return Ok(tests);
+    }
     let binaries = manifest
         .targets
         .iter()
@@ -507,7 +565,7 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
         let token = args[i].as_str();
 
         if token == "--" {
-            if mode != BuildMode::Run {
+            if !matches!(mode, BuildMode::Run | BuildMode::Test) {
                 return Err(
                     "runtime arguments after `--` are only valid with `vex run`".to_string()
                 );
@@ -559,6 +617,9 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
                     "unknown Vex option `{token}`. Vex does not accept raw wavec flags here"
                 ));
             }
+            _ if mode == BuildMode::Test && options.filter.is_none() => {
+                options.filter = Some(token.into())
+            }
             _ => {
                 return Err(format!(
                     "unexpected argument `{token}`. Vex builds the package described by vex.ws"
@@ -571,6 +632,11 @@ fn parse_vex_build_options(mode: BuildMode, args: &[String]) -> Result<VexBuildO
 
     if options.release && options.profile.is_some() {
         return Err("--release and --profile select the same setting; use only one".into());
+    }
+    if mode == BuildMode::Test && (options.library || !options.binaries.is_empty()) {
+        return Err(
+            "vex test selects explicit test targets with a name filter, not --lib/--bin".into(),
+        );
     }
     if mode == BuildMode::Run && (options.library || options.binaries.len() > 1) {
         return Err(
@@ -624,6 +690,7 @@ fn set_target(options: &mut VexBuildOptions, target: &str) -> Result<(), String>
 
 fn build_usage(mode: BuildMode) -> &'static str {
     match mode {
+        BuildMode::Test => "usage: vex test [filter] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]",
         BuildMode::Build => {
             "usage: vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name> | --release] [--dry-run] [--locked] [--offline]"
         }

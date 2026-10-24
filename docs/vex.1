@@ -3,7 +3,7 @@
 vex \- Wave package manager
 .SH SYNOPSIS
 .B vex
-[-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] [-p|--package <name>|--workspace] [--features <features>] [--no-default-features] <command> [options]
+[-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] [-p|--package <name>|--workspace] [--features <features>] [--no-default-features] [--include-tests] <command> [options]
 .SH COMMANDS
 .TP
 .B vex init [\-\-lib]
@@ -17,6 +17,9 @@ Compile and execute one binary
 .TP
 .B vex check [\-\-lib] [\-\-bin <name>] [\-\-target <triple>] [\-\-profile <name>|\-\-release] [\-\-dry\-run] [\-\-locked] [\-\-offline]
 Check selected package targets
+.TP
+.B vex test [filter] [\-\-target <triple>] [\-\-profile <name>|\-\-release] [\-\-dry\-run] [\-\-locked] [\-\-offline] [\-\- <args...>]
+Compile and execute explicit main-based tests; run every selected test and return the first failure
 .TP
 .B vex fetch [\-\-locked] [\-\-offline] [\-\-target <triple>]
 Manage fetch

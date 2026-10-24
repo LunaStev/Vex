@@ -124,6 +124,7 @@ impl Context {
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct Selection {
+    pub include_tests: bool,
     pub target: Option<Context>,
     pub features: BTreeSet<String>,
     pub no_default_features: bool,
@@ -131,6 +132,8 @@ pub struct Selection {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub development: bool,
     pub key: String,
     pub alias: String,
     pub optional: bool,
@@ -141,6 +144,7 @@ pub struct Edge {
 impl Edge {
     pub fn unconditional(key: String, alias: String) -> Self {
         Self {
+            development: false,
             key,
             alias,
             optional: false,
@@ -266,6 +270,10 @@ pub fn validate(features: &Features, edges: &[Edge]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]

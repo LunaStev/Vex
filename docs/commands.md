@@ -10,11 +10,12 @@ See [manifest and operational contracts](reference.md) for field types, environm
 Vex - Wave package manager
 
 Usage:
-  vex [-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] [-p|--package <name>|--workspace] [--features <features>] [--no-default-features] <command> [options]
+  vex [-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] [-p|--package <name>|--workspace] [--features <features>] [--no-default-features] [--include-tests] <command> [options]
   vex init [--lib]
   vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
   vex run [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]
   vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
+  vex test [filter] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]
   vex fetch [--locked] [--offline] [--target <triple>]
   vex update [<package>...] [--target <triple>]
   vex info
@@ -67,6 +68,14 @@ Compile and execute one binary
 usage: vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]
 
 Check selected package targets
+```
+
+## test
+
+```text
+usage: vex test [filter] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]
+
+Compile and execute explicit main-based tests; run every selected test and return the first failure
 ```
 
 ## fetch

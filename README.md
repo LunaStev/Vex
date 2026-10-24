@@ -622,3 +622,21 @@ existing layout: `vex completions bash|zsh|fish|powershell` and `vex manpage` pr
 installable scripts and the `vex(1)` manual. No compiler or network is queried.
 The checked-in [command reference](docs/commands.md), `docs/completions/`, and
 `docs/vex.1` are generated from `tools/command-spec.json`; CI verifies drift.
+
+Format 4 supports explicit executable tests, each with a normal Wave `main`:
+
+```wson
+ targets = { lib = {}, tests = [{ name = "smoke", path = "tests/smoke.wave" }] },
+ test_dependencies = [{ name = "fixtures", path = "../fixtures" }]
+```
+
+`vex test [name-substring] [--locked] [--offline] [-- <args...>]` compiles all
+selected tests before running them in package/name order. Every selected test
+runs; the first failed program's exit code is returned unchanged. Test results
+appear as `test_result` events in `--message-file` JSONL; program stdio is inherited.
+No test result is cached. Compilation failures stop the batch. Cross targets
+require a compiler-supported runner and otherwise fail before execution.
+Test dependencies are fetched into the union lock, selected only for a root test
+invocation, and never propagated as a dependency's ordinary imports. Query them
+with `tree` or `metadata --include-tests --format-version 2`.
+Wave's compiler-native unit-test harness remains unsupported until Wave adds it.

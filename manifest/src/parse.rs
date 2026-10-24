@@ -16,6 +16,7 @@ const ROOT_FIELDS: &[&str] = &[
     "author",
     "license",
     "dependencies",
+    "test_dependencies",
     "targets",
     "default_run",
     "profiles",
@@ -88,6 +89,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
             "native",
             "version",
             "dependencies",
+            "test_dependencies",
             "features",
             "default_run",
         ]
@@ -167,7 +169,30 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     let description = parse_optional_string(data.get("description"), "description")?;
     let author = parse_optional_string(data.get("author"), "author")?;
     let license = parse_optional_string(data.get("license"), "license")?;
-    let dependencies = parse_dependencies(data.get("dependencies"), format)?;
+    let mut dependencies = parse_dependencies(data.get("dependencies"), format)?;
+    if data.contains_key("test_dependencies") && format < 4 {
+        return Err("test_dependencies require format = 4".into());
+    }
+    let mut test_dependencies = parse_dependencies(data.get("test_dependencies"), format)?;
+    for dependency in &mut test_dependencies {
+        dependency.test_only = true;
+    }
+    for dependency in &test_dependencies {
+        if dependencies
+            .iter()
+            .any(|normal| normal.name == dependency.name)
+        {
+            return Err(format!(
+                "test dependency alias `{}` duplicates a normal dependency",
+                dependency.name
+            ));
+        }
+    }
+    dependencies.extend(test_dependencies);
+    let tests = crate::model::parse_tests(&data, &name)?;
+    if !tests.is_empty() && format < 4 {
+        return Err("test targets require format = 4".into());
+    }
 
     let features = match data.get("features") {
         Some(value) if format >= 4 => serde_json::from_value(wson::json_value(value)?)
@@ -194,6 +219,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     }
 
     Ok(Manifest {
+        tests,
         workspace,
         virtual_workspace,
         scope: None,
@@ -376,6 +402,7 @@ fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Depe
             }
         };
         dependencies.push(Dependency {
+            test_only: false,
             binding_alias: None,
             target,
             optional,

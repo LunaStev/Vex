@@ -1,5 +1,5 @@
 {
-  "globals": "[-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] [-p|--package <name>|--workspace] [--features <features>] [--no-default-features]",
+  "globals": "[-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] [-p|--package <name>|--workspace] [--features <features>] [--no-default-features] [--include-tests]",
   "commands": [
     {
       "name": "init",
@@ -20,6 +20,11 @@
       "name": "check",
       "usage": "check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]",
       "description": "Check selected package targets"
+    },
+    {
+      "name": "test",
+      "usage": "test [filter] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]",
+      "description": "Compile and execute explicit main-based tests; run every selected test and return the first failure"
     },
     {
       "name": "fetch",

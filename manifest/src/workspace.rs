@@ -252,7 +252,7 @@ pub fn apply_policy(
         }
     }
     let directory = member.source_path.parent().unwrap();
-    for target in &mut member.targets {
+    for target in member.targets.iter_mut().chain(member.tests.iter_mut()) {
         target.path = directory.join(&target.path);
     }
     member.scope = Some(context.clone());

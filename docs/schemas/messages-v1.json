@@ -214,6 +214,43 @@
           ]
         }
       }
+    },
+    {
+      "required": [
+        "event",
+        "package",
+        "test",
+        "origin",
+        "exit_code",
+        "signal",
+        "success"
+      ],
+      "properties": {
+        "event": {
+          "const": "test_result"
+        },
+        "package": {
+          "type": "string"
+        },
+        "test": {
+          "type": "string"
+        },
+        "origin": {
+          "const": "program"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "signal": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "success": {
+          "type": "boolean"
+        }
+      }
     }
   ]
 }

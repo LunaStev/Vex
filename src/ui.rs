@@ -25,6 +25,11 @@ pub fn status(action: &str, message: impl AsRef<str>) {
     ));
 }
 
+/// Command results stay visible in quiet mode, unlike progress.
+pub fn result(message: impl AsRef<str>) {
+    let _ = diagnostic::output::stderr(format_args!("{}\n", source::redact(message.as_ref())));
+}
+
 pub fn verbose(message: impl AsRef<str>) {
     status("Detail", message);
 }
