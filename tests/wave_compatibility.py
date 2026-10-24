@@ -141,6 +141,37 @@ def package_identity_smoke(vex, root, env):
         raise RuntimeError("two package versions were not imported through their explicit aliases")
 
 
+def feature_graph_smoke(vex, root, env, host_target):
+    for directory, name, version in (("feature_active", "platform", "1.0.0"), ("feature_inactive", "platform", "2.0.0"), ("feature_extra", "extras", "1.0.0")):
+        package = root / directory
+        (package / "src").mkdir(parents=True)
+        compiler = ',compiler="9.0.0"' if directory == "feature_inactive" else ""
+        (package / "vex.ws").write_text(
+            '{format=4,name="' + name + '",version="' + version + '",targets={lib={}}' + compiler + '}', encoding="utf-8")
+        (package / "src/lib.wave").write_text('pub fun value() -> i32 { return 11; }\n', encoding="utf-8")
+    app = root / "feature_app"
+    (app / "src").mkdir(parents=True)
+    other = "wasm32-unknown-unknown"
+    (app / "vex.ws").write_text(
+        '{format=4,name="app",targets={bins=[{name="app",path="src/main.wave"}]},dependencies=['
+        '{name="platform",path="../feature_active",target={triple="' + host_target + '"}},'
+        '{name="platform",path="../feature_inactive",target={triple="' + other + '"}},'
+        '{name="extras",path="../feature_extra",optional=true}],features={default=["dep:extras"]}}', encoding="utf-8")
+    (app / "src/main.wave").write_text('import("platform")::{value};\nfun main() { println("{}", value()); }\n', encoding="utf-8")
+    run([vex, "fetch", "--target", host_target], app, env)
+    locked = (app / "vex.lock").read_bytes()
+    for flags in ([], ["--no-default-features"]):
+        result = run([vex, "run", "--locked", "--offline", *flags], app, env)
+        if result.stdout.strip() != "11":
+            raise RuntimeError("selected target/feature graph did not execute correctly")
+    result = run([vex, "metadata", "--format-version", "2", "--target", other, "--locked"], app, env)
+    packages = json.loads(result.stdout)["packages"]
+    if not any(package["name"] == "platform" and package["version"] == "2.0.0" for package in packages):
+        raise RuntimeError("offline target selection did not expose its locked platform package")
+    if (app / "vex.lock").read_bytes() != locked:
+        raise RuntimeError("target or feature selection rewrote the union lockfile")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vex", type=Path, required=True)
@@ -160,6 +191,7 @@ def main():
     env["PATH"] = str(args.wavec_bin.resolve()) + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory(prefix="vex-wave-compat-") as temporary:
         root = Path(temporary)
+        env["VEX_CACHE_HOME"] = str(root / "cache")
         # Python's Windows executable search does not use a replacement env PATH.
         # Probe this exact compiler; Vex itself still selects it through PATH.
         version = run([str(compiler), "--version"], root, dict(env, NO_COLOR="1"))
@@ -192,6 +224,7 @@ def main():
                 host_target = plan["target"]
         target_profile_smoke(vex, root, env, host_target)
         package_identity_smoke(vex, root, env)
+        feature_graph_smoke(vex, root, env, host_target)
         run([vex, "check", "--target", host_target, "--locked", "--offline"], nested, env)
         rejected = run([vex, "build", "--emit=obj"], app, env, succeeds=False)
         if "unknown Vex option" not in rejected.stderr:

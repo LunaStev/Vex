@@ -6,6 +6,7 @@ use lockfile::{
 };
 use manifest::Manifest;
 
+mod activation;
 mod cache;
 mod git;
 mod graph;
@@ -30,6 +31,8 @@ pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), Error>
 
 #[derive(Clone, Debug, Default)]
 pub struct ResolveOptions {
+    pub additional_contexts: Vec<source::graph::Context>,
+    pub selection: source::graph::Selection,
     pub dry_run: bool,
     pub update: UpdatePolicy,
     pub locked: bool,
@@ -61,13 +64,45 @@ impl UpdatePolicy {
 #[derive(Debug)]
 pub struct Resolution {
     packages: Vec<LockedPackage>,
+    union: Vec<LockedPackage>,
+    root: source::graph::Root,
+    selection: source::graph::Selection,
+    selected_edges: Vec<String>,
+    selected_features: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     _guard: state::Guard,
 }
 
 impl Resolution {
+    pub fn selection(&self) -> &source::graph::Selection {
+        &self.selection
+    }
+    pub fn root_dependencies(&self) -> &[String] {
+        &self.selected_edges
+    }
+    pub fn selected_features(
+        &self,
+    ) -> &std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        &self.selected_features
+    }
+    pub fn union_packages(&self) -> &[LockedPackage] {
+        &self.union
+    }
+    pub fn activate(&mut self, selection: &source::graph::Selection) -> Result<(), Error> {
+        let active = activation::select(&self.root, &self.union, selection)?;
+        self.selection = selection.clone();
+        self.packages = active.packages;
+        self.selected_edges = active.roots;
+        self.selected_features = active.features;
+        Ok(())
+    }
+
     pub fn dependency_args(&self) -> Result<Vec<String>, Error> {
         let mut args = vec!["--dep-root=.vex/deps".to_string()];
+        let mut aliases = BTreeSet::new();
         for package in &self.packages {
+            if !aliases.insert(package.import_name()) {
+                continue;
+            }
             let path = package.directory();
             let path = path.to_str().ok_or_else(|| {
                 Error::resolution(format!(
@@ -75,7 +110,7 @@ impl Resolution {
                     package.name
                 ))
             })?;
-            args.push(format!("--dep={}={path}", package.name));
+            args.push(format!("--dep={}={path}", package.import_name()));
         }
         Ok(args)
     }
@@ -112,6 +147,17 @@ where
     F: FnMut(&str, String),
     V: FnMut(&Manifest) -> Result<(), Error>,
 {
+    source::graph::expand(
+        &manifest.features,
+        &manifest
+            .dependencies
+            .iter()
+            .map(|d| d.edge(d.name.clone()))
+            .collect::<Vec<_>>(),
+        &options.selection.features,
+        !options.selection.no_default_features,
+    )
+    .map_err(Error::resolution)?;
     if !manifest.dependencies.is_empty() {
         status(
             "Resolving",
@@ -152,9 +198,25 @@ where
 pub fn inspect(
     manifest: &Manifest,
     locked: bool,
+    status: impl FnMut(&str, String),
+) -> Result<Resolution, Error> {
+    inspect_selected(
+        manifest,
+        locked,
+        source::graph::Selection::default(),
+        status,
+    )
+}
+
+pub fn inspect_selected(
+    manifest: &Manifest,
+    locked: bool,
+    selection: source::graph::Selection,
     mut status: impl FnMut(&str, String),
 ) -> Result<Resolution, Error> {
     let options = ResolveOptions {
+        selection,
+        additional_contexts: Vec::new(),
         dry_run: true,
         offline: true,
         locked,
@@ -265,6 +327,8 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     if let UpdatePolicy::UpdateSelected(selected) = &options.update {
         let mut preflight = graph::Resolver::new(
             ResolveOptions {
+                selection: options.selection.clone(),
+                additional_contexts: Vec::new(),
                 dry_run: true,
                 update: UpdatePolicy::UpdateSelected(selected.clone()),
                 locked: false,
@@ -277,7 +341,6 @@ fn resolve_guarded<F: FnMut(&str, String)>(
             root_manifest.clone(),
             &existing,
             &mut status,
-            validate,
         );
         // Local discovery must reuse pinned sources even for selected names.
         preflight.local_preflight();
@@ -293,7 +356,16 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         .as_ref()
         .map(|t| t.stage.clone())
         .unwrap_or(dep_root);
-    let packages = {
+    let mut selection = options.selection.clone();
+    if selection.target.is_none() {
+        selection.target = Some(match &manifest.build_target {
+            Some(target) => source::graph::Context::new(target).map_err(Error::resolution)?,
+            None => source::graph::Context::host(),
+        });
+    }
+    let additional_contexts = options.additional_contexts.clone();
+    validate(manifest)?;
+    let ((packages, manifests), root_record) = {
         let mut resolver = graph::Resolver::new(
             options,
             root,
@@ -303,20 +375,25 @@ fn resolve_guarded<F: FnMut(&str, String)>(
             root_manifest,
             &existing,
             &mut status,
-            validate,
         );
         resolver.resolve_manifest_dependencies(manifest)?;
         resolver.validate_selected_packages()?;
-        resolver.into_packages()
+        let root_record = resolver.root_record(manifest)?;
+        (resolver.into_packages(), root_record)
     };
     let requires_v4 = manifest.format >= 4
         || packages
             .iter()
             .any(|p| p.id.is_some() || p.subdir.is_some());
     let resolved = Lockfile {
+        roots: if requires_v4 {
+            vec![root_record.clone()]
+        } else {
+            Vec::new()
+        },
         version: if !requires_v4 && (locked || dry_run) && matches!(existing.version, 2 | 3) {
             existing.version
-        } else if !requires_v4 {
+        } else if !requires_v4 && (missing_lockfile || existing.version < 4) {
             3
         } else {
             LOCKFILE_VERSION
@@ -338,6 +415,34 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         }
     }
 
+    let active = activation::select(&root_record, &resolved.packages, &selection)?;
+    let mut validate_keys = active
+        .packages
+        .iter()
+        .map(|p| p.name.clone())
+        .collect::<BTreeSet<_>>();
+    for context in additional_contexts {
+        let mut selected = selection.clone();
+        selected.target = Some(context);
+        validate_keys.extend(
+            activation::select(&root_record, &resolved.packages, &selected)?
+                .packages
+                .into_iter()
+                .map(|p| p.name),
+        );
+    }
+    for key in validate_keys {
+        let candidate = &manifests[&key];
+        validate(candidate).map_err(|error| {
+            error
+                .with_field("package", &candidate.name)
+                .with_field("manifest", candidate.source_path.display())
+                .context(format!(
+                    "failed to validate selected dependency `{}`",
+                    candidate.name
+                ))
+        })?;
+    }
     let needs_lockfile = missing_lockfile || resolved != existing;
     let lockfile_decision = if missing_lockfile {
         "lockfile: write required because vex.lock is missing".to_owned()
@@ -391,7 +496,12 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     }
 
     Ok(Resolution {
-        packages: resolved.packages,
+        packages: active.packages,
+        union: resolved.packages,
+        root: root_record,
+        selection,
+        selected_edges: active.roots,
+        selected_features: active.features,
         _guard: guard,
     })
 }

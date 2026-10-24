@@ -159,7 +159,14 @@ pub(crate) fn restore(destination: &Path, url: &str, commit: &str) -> Result<boo
         } else {
             git::run(
                 local()
-                    .args(["clone", "--no-hardlinks", "--no-checkout", "--local", "--"])
+                    .args([
+                        "clone",
+                        "--no-hardlinks",
+                        "--dissociate",
+                        "--no-checkout",
+                        "--local",
+                        "--",
+                    ])
                     .arg(git_cli_path(&cache.path).as_ref())
                     .arg(git_cli_path(destination).as_ref()),
                 "restore cached Git objects",
@@ -257,7 +264,14 @@ pub(crate) fn store(checkout: &Path, url: &str, commit: &str) -> Result<(), Erro
     let result = (|| {
         git::run(
             local()
-                .args(["clone", "--bare", "--no-hardlinks", "--local", "--"])
+                .args([
+                    "clone",
+                    "--bare",
+                    "--no-hardlinks",
+                    "--dissociate",
+                    "--local",
+                    "--",
+                ])
                 .arg(git_cli_path(checkout).as_ref())
                 .arg(git_cli_path(&stage).as_ref()),
             "cache verified Git objects",

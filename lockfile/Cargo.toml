@@ -12,3 +12,5 @@ diagnostic.workspace = true
 source.workspace = true
 wson.workspace = true
 sha2 = "0.10"
+serde_json.workspace = true
+serde = { version = "1", features = ["derive"] }

@@ -120,18 +120,28 @@ fn named_library(
 /// Dependent libraries precede their dependencies, including diamonds. Preserve
 /// declaration order within a package because static archive order is significant.
 fn manifests(root: &Manifest, resolution: &Resolution) -> Result<Vec<Manifest>, Error> {
-    let mut values = BTreeMap::from([(root.name.clone(), root.clone())]);
+    let mut values = BTreeMap::from([(
+        root.name.clone(),
+        (
+            root.clone(),
+            resolution.root_dependencies().to_vec(),
+            format!("root:{}", root.source_path.display()),
+        ),
+    )]);
     for package in resolution.packages() {
-        let directory = package.directory();
         values.insert(
             package.name.clone(),
-            Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?,
+            (
+                Manifest::load_from(package.directory().join(manifest::MANIFEST_FILE))?,
+                package.dependencies.clone(),
+                package.id.clone().unwrap_or_else(|| package.name.clone()),
+            ),
         );
     }
     let mut incoming: BTreeMap<_, usize> = values.keys().map(|name| (name.clone(), 0)).collect();
-    for manifest in values.values() {
-        for dependency in &manifest.dependencies {
-            *incoming.get_mut(&dependency.name).ok_or_else(|| {
+    for (_, dependencies, _) in values.values() {
+        for dependency in dependencies {
+            *incoming.get_mut(dependency).ok_or_else(|| {
                 Error::resolution("incomplete native dependency graph; run vex fetch")
             })? += 1;
         }
@@ -142,16 +152,19 @@ fn manifests(root: &Manifest, resolution: &Resolution) -> Result<Vec<Manifest>, 
         .map(|(name, _)| name.clone())
         .collect();
     let mut result = Vec::new();
+    let mut seen = BTreeSet::new();
     while let Some(name) = ready.pop_first() {
-        let manifest = values.remove(&name).unwrap();
-        for dependency in &manifest.dependencies {
-            let count = incoming.get_mut(&dependency.name).unwrap();
+        let (manifest, dependencies, identity) = values.remove(&name).unwrap();
+        for dependency in dependencies {
+            let count = incoming.get_mut(&dependency).unwrap();
             *count -= 1;
             if *count == 0 {
-                ready.insert(dependency.name.clone());
+                ready.insert(dependency);
             }
         }
-        result.push(manifest);
+        if seen.insert(identity) {
+            result.push(manifest);
+        }
     }
     if !values.is_empty() {
         return Err(Error::resolution("cycle in native dependency graph"));

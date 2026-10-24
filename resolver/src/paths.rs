@@ -134,6 +134,20 @@ pub(crate) fn git_cli_path(path: &Path) -> Cow<'_, Path> {
     }
 }
 
+pub(crate) fn portable_path(path: &Path) -> Result<String, Error> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| Error::resolution("dependency graph cannot represent a non-UTF-8 path"))?;
+    #[cfg(windows)]
+    {
+        Ok(value.replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(value.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

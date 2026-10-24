@@ -40,7 +40,12 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
     if format_version == 1 {
         require_single_target(&manifest)?;
     }
-    let resolution = resolver::inspect(&manifest, locked, crate::ui::status)?;
+    let resolution = resolver::inspect_selected(
+        &manifest,
+        locked,
+        selection.graph.clone(),
+        crate::ui::status,
+    )?;
     let mut packages = Vec::new();
     for package in resolution.packages() {
         let (_resolved, source) = match &package.source {
@@ -75,7 +80,8 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
         value["source"] = source;
         if package.id.is_some() {
             value["id"] = json!(package.id);
-            value["alias"] = json!(package.name);
+            value["alias"] = json!(package.import_name());
+            value["binding"] = json!(package.name);
         }
         let mut dependencies = package.dependencies.clone();
         dependencies.sort();
@@ -83,8 +89,12 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
         packages.push(value);
     }
     packages.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let mut root_record = package_record(&manifest, root, &project.manifest_path, format_version)?;
+    root_record["dependencies"] = json!(resolution.root_dependencies());
     let value: Value = json!({"schema_version":format_version,
-        "root":package_record(&manifest, root, &project.manifest_path, format_version)?,
+        "root":root_record,
+        "selected_features":resolution.selected_features(), "selection":resolution.selection(),
+        "union_bindings":resolution.union_packages().iter().map(|p| json!({"binding":p.name,"alias":p.import_name(),"id":p.id,"name":p.package_name(),"version":p.version,"dependencies":p.dependencies,"edges":p.edges,"features":p.features})).collect::<Vec<_>>(),
         "target_directory":json_path(&root.join("target"))?, "packages":packages});
     diagnostic::outln!(
         "{}",
@@ -131,6 +141,9 @@ fn package_record(
         "manifest_format":manifest.format, "compiler":manifest.compiler,
         "root":json_path(root)?, "manifest_path":json_path(manifest_path)?,
         "native":crate::native::configuration(manifest), "dependencies":dependencies});
+    if version >= 2 {
+        value["features"] = json!(manifest.features);
+    }
     if manifest.format >= 4 {
         value["id"] = json!(lockfile::package_identity(
             &manifest.name,

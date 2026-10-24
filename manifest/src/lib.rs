@@ -55,6 +55,11 @@ pub enum DependencySource {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Dependency {
+    pub binding_alias: Option<String>,
+    pub target: Option<source::graph::Predicate>,
+    pub optional: bool,
+    pub features: Vec<String>,
+    pub default_features: bool,
     pub package: Option<String>,
     pub version_req: Option<String>,
     pub modern: bool,
@@ -81,10 +86,25 @@ pub struct Manifest {
     pub author: Option<String>,
     pub license: Option<String>,
     pub dependencies: Vec<Dependency>,
+    pub features: source::graph::Features,
     pub source_path: PathBuf,
 }
 
 impl Dependency {
+    pub fn import_name(&self) -> &str {
+        self.binding_alias.as_deref().unwrap_or(&self.name)
+    }
+    pub fn edge(&self, key: String) -> source::graph::Edge {
+        source::graph::Edge {
+            key,
+            alias: self.import_name().into(),
+            optional: self.optional,
+            default_features: self.default_features,
+            features: self.features.clone(),
+            target: self.target.clone(),
+        }
+    }
+
     pub fn package_name(&self) -> &str {
         self.package.as_deref().unwrap_or(&self.name)
     }
@@ -96,7 +116,7 @@ impl Dependency {
         {
             return Err(format!(
                 "dependency `{}` requires version `{}` but source contains version `{found}`",
-                self.name,
+                self.import_name(),
                 self.version.as_ref().unwrap()
             ));
         }

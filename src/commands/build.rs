@@ -44,7 +44,15 @@ pub fn build(
     let compiler = Compiler::select();
     let _project = selection.enter()?;
     let manifest = Manifest::load()?;
-    run_build(mode, &manifest, options, runtime, compiler, messages)
+    run_build(
+        mode,
+        &manifest,
+        options,
+        runtime,
+        compiler,
+        messages,
+        selection.graph.clone(),
+    )
 }
 
 fn run_build(
@@ -54,6 +62,7 @@ fn run_build(
     runtime: &[std::ffi::OsString],
     compiler: Result<Compiler, Error>,
     messages: &mut Messages,
+    mut graph_selection: source::graph::Selection,
 ) -> Result<Outcome, Error> {
     let started = Instant::now();
     let root = std::env::current_dir().map_err(Error::environment)?;
@@ -80,9 +89,35 @@ fn run_build(
         compiler.validate_target(target)?;
     }
     compiler.validate_version(manifest.compiler.as_deref())?;
-    let resolution = resolve_validated(
+    // Recovery has precedence over target-capability queries. Resolution takes
+    // its own lease and rechecks recovery after this query, so a concurrent
+    // transaction cannot expose sources without coordination.
+    let recovery_guard =
+        state::Guard::acquire(options.dry_run, ui::status).map_err(Error::environment)?;
+    resolver::recover_project(&recovery_guard, options.dry_run)?;
+    drop(recovery_guard);
+    let spec = compiler.target_spec(requested_triple)?;
+    let triple = spec["triple"].as_str().unwrap().to_owned();
+    let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
+    if let Some(mode) = manifest.platform_for(selected[0], &triple).mode {
+        context.mode = mode.as_str().into();
+    }
+    graph_selection.target = Some(context);
+    let mut resolution = resolve_validated(
         manifest,
         ResolveOptions {
+            additional_contexts: selected
+                .iter()
+                .map(|target| {
+                    let mut context =
+                        source::graph::Context::new(&triple).map_err(Error::resolution)?;
+                    if let Some(mode) = manifest.platform_for(target, &triple).mode {
+                        context.mode = mode.as_str().into();
+                    }
+                    Ok(context)
+                })
+                .collect::<Result<_, Error>>()?,
+            selection: graph_selection.clone(),
             dry_run: options.dry_run,
             update: UpdatePolicy::ReuseLocked,
             locked: options.locked,
@@ -91,8 +126,6 @@ fn run_build(
         ui::status,
         |candidate| compiler.validate_version(candidate.compiler.as_deref()),
     )?;
-    let spec = compiler.target_spec(requested_triple)?;
-    let triple = spec["triple"].as_str().unwrap().to_owned();
     ui::verbose(format!("target: {triple}"));
     ui::verbose(format!("compiler: {}", compiler.path().display()));
     ui::trace(format!(
@@ -128,6 +161,12 @@ fn run_build(
     let reporting = messages.enabled();
     messages.status("compiler")?;
     for target in &selected {
+        let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
+        if let Some(mode) = manifest.platform_for(target, &triple).mode {
+            context.mode = mode.as_str().into();
+        }
+        graph_selection.target = Some(context);
+        resolution.activate(&graph_selection)?;
         let configuration = crate::native::prepare_target(
             manifest,
             target,
@@ -352,8 +391,14 @@ pub(crate) fn validate_entry(manifest: &Manifest, target: &PackageTarget) -> Res
             target.name
         )));
     }
-    if manifest.format == 3 {
-        let root = std::env::current_dir().map_err(Error::environment)?;
+    if manifest.format >= 3 {
+        let root = manifest
+            .source_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .map_err(Error::environment)?;
         let actual = path.canonicalize().map_err(Error::environment)?;
         if !actual.starts_with(root) {
             return Err(Error::resolution(

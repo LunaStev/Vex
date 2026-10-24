@@ -52,6 +52,65 @@ pub fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("serializing a string cannot fail")
 }
 
+/// Convert an already validated WSON subtree to typed machine data. Extended
+/// scalar literals are rejected instead of silently changing their meaning.
+pub fn json_value(value: &WsonValue) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    Ok(match value {
+        WsonValue::Null => Value::Null,
+        WsonValue::Bool(value) => Value::Bool(*value),
+        WsonValue::Int(value) => (*value).into(),
+        WsonValue::Float(value) => serde_json::Number::from_f64(*value)
+            .map(Value::Number)
+            .ok_or("invalid JSON number")?,
+        WsonValue::String(value) => Value::String(value.clone()),
+        WsonValue::Array(values) => {
+            Value::Array(values.iter().map(json_value).collect::<Result<_, _>>()?)
+        }
+        WsonValue::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), json_value(v)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        _ => return Err("this field requires ordinary JSON-compatible values".into()),
+    })
+}
+
+/// Render protocol-shaped JSON data using WSON field names and versioned
+/// string escaping. Arbitrary JSON object keys are intentionally rejected.
+pub fn render_json(value: &serde_json::Value) -> Result<String, String> {
+    use serde_json::Value;
+    Ok(match value {
+        Value::Object(values) => {
+            let fields = values
+                .iter()
+                .map(|(key, value)| {
+                    if key.is_empty()
+                        || !key
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    {
+                        return Err("invalid WSON field name".into());
+                    }
+                    Ok(format!("{key} = {}", render_json(value)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            format!("{{{}}}", fields.join(", "))
+        }
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(render_json)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        ),
+        Value::String(value) => quote(value),
+        other => other.to_string(),
+    })
+}
+
 struct Parser<'a> {
     raw: &'a str,
     pos: usize,

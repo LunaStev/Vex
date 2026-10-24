@@ -1,17 +1,23 @@
 use crate::{LockedPackage, LockedSource, Lockfile};
 
 pub fn render_lockfile(lockfile: Lockfile) -> String {
-    let version = lockfile.version;
+    // Writing uses escaped strings. Read-only locked operations never call this.
+    let version = lockfile.version.max(3);
+    let roots = if lockfile.roots.is_empty() {
+        String::new()
+    } else {
+        format!("    roots = {},\n", graph_json(&lockfile.roots))
+    };
     let blocks = lockfile
         .packages
         .iter()
         .map(render_package)
         .collect::<Vec<_>>();
     if blocks.is_empty() {
-        return format!("{{\n    version = {version},\n    package = []\n}}\n");
+        return format!("{{\n    version = {version},\n{roots}    package = []\n}}\n");
     }
     format!(
-        "{{\n    version = {version},\n    package = [\n{}\n    ]\n}}\n",
+        "{{\n    version = {version},\n{roots}    package = [\n{}\n    ]\n}}\n",
         blocks.join(",\n")
     )
 }
@@ -26,6 +32,21 @@ fn render_package(package: &LockedPackage) -> String {
     }
     if let Some(id) = &package.id {
         fields.push(render_field("id", id));
+    }
+    if let Some(alias) = &package.import_name {
+        fields.push(render_field("import_name", alias));
+    }
+    if !package.edges.is_empty() {
+        fields.push(format!(
+            "            edges = {}",
+            graph_json(&package.edges)
+        ));
+    }
+    if !package.features.is_empty() {
+        fields.push(format!(
+            "            features = {}",
+            graph_json(&package.features)
+        ));
     }
     match &package.source {
         LockedSource::Path {
@@ -90,4 +111,9 @@ fn portable_path(path: &std::path::Path) -> String {
     {
         path.to_string_lossy().into_owned()
     }
+}
+
+fn graph_json(value: &impl serde::Serialize) -> String {
+    wson::render_json(&serde_json::to_value(value).expect("graph is serializable"))
+        .expect("validated graph field names")
 }

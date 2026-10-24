@@ -56,6 +56,7 @@ fn run_init(is_lib: bool) -> Result<(), Error> {
             lockfile::encode(Lockfile {
                 version: 3,
                 packages: Vec::new(),
+                roots: Vec::new(),
             }),
         ),
     ];

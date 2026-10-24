@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct Selection {
+    pub graph: source::graph::Selection,
     pub manifest_path: Option<PathBuf>,
 }
 

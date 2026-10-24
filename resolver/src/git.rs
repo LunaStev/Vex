@@ -80,7 +80,7 @@ pub(crate) fn ensure_repository(
     } else {
         run(
             command()
-                .args(["clone", "--", url])
+                .args(["clone", "--no-hardlinks", "--dissociate", "--", url])
                 .arg(git_cli_path(destination).as_ref()),
             "clone Git dependency",
         )?;

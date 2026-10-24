@@ -39,6 +39,8 @@ pub fn prune(
     let resolution = resolve_guarded(
         manifest,
         ResolveOptions {
+            additional_contexts: Vec::new(),
+            selection: Default::default(),
             dry_run: true,
             locked: true,
             offline: true,
@@ -52,7 +54,7 @@ pub fn prune(
         error.context("cannot prune before the local graph is prepared; run `vex fetch`")
     })?;
     let used: Vec<_> = resolution
-        .packages()
+        .union_packages()
         .iter()
         .map(|package| {
             let (LockedSource::Path { resolved, .. } | LockedSource::Git { resolved, .. }) =

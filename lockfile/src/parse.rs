@@ -25,6 +25,7 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
         return Ok(Lockfile {
             version,
             packages: Vec::new(),
+            roots: Vec::new(),
         });
     }
     if version != 2 && version != 3 && version != LOCKFILE_VERSION {
@@ -32,7 +33,7 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
             "unsupported `{LOCKFILE_NAME}` version `{version}`; expected `{LOCKFILE_VERSION}`"
         ));
     }
-    reject_unknown_fields(&data, &["version", "package"], "root")?;
+    reject_unknown_fields(&data, &["version", "package", "roots"], "root")?;
 
     let packages = match data.get("package") {
         Some(WsonValue::Array(items)) => items
@@ -47,7 +48,17 @@ fn parse_lockfile_inner(raw: &str) -> Result<Lockfile, String> {
         None => Vec::new(),
     };
 
-    let lockfile = Lockfile { version, packages };
+    let roots: Vec<source::graph::Root> = match data.get("roots") {
+        Some(value) if version >= 4 => serde_json::from_value(wson::json_value(value)?)
+            .map_err(|e| format!("invalid lockfile roots: {e}"))?,
+        Some(_) => return Err("lockfile roots require version 4".into()),
+        None => Vec::new(),
+    };
+    let lockfile = Lockfile {
+        version,
+        packages,
+        roots,
+    };
     validate_graph(&lockfile)?;
     let normalized = lockfile.normalized();
     Ok(normalized)
@@ -67,6 +78,9 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
             "name",
             "id",
             "package",
+            "import_name",
+            "edges",
+            "features",
             "version",
             "source",
             "path",
@@ -77,6 +91,9 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
             "name",
             "id",
             "package",
+            "import_name",
+            "edges",
+            "features",
             "version",
             "source",
             "git",
@@ -125,6 +142,25 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
             ))
         }
     };
+    let import_name = optional_string(object, "import_name")?;
+    let edges = match object.get("edges") {
+        Some(value) => serde_json::from_value(wson::json_value(value)?)
+            .map_err(|e| format!("invalid lockfile edges: {e}"))?,
+        None => Vec::new(),
+    };
+    let features = match object.get("features") {
+        Some(value) => serde_json::from_value(wson::json_value(value)?)
+            .map_err(|e| format!("invalid locked features: {e}"))?,
+        None => source::graph::Features::new(),
+    };
+    if lock_version < 4
+        && (import_name.is_some()
+            || object.contains_key("edges")
+            || object.contains_key("features"))
+    {
+        return Err("activation graph requires version 4".into());
+    }
+    source::graph::validate(&features, &edges)?;
     let package = optional_string(object, "package")?;
     let id = optional_string(object, "id")?;
     if (package.is_some() || id.is_some()) && lock_version < 4 {
@@ -154,6 +190,9 @@ fn parse_package(value: &WsonValue, lock_version: i64) -> Result<LockedPackage, 
         source::validate_subdir(value)?;
     }
     Ok(LockedPackage {
+        import_name,
+        edges,
+        features,
         package,
         id,
         subdir,
@@ -203,6 +242,48 @@ fn validate_graph(lockfile: &Lockfile) -> Result<(), String> {
                 "`{LOCKFILE_NAME}` contains duplicate package `{}`",
                 package.name
             ));
+        }
+    }
+    let validate_edges = |edges: &[source::graph::Edge]| -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for edge in edges {
+            if !seen.insert(serde_json::to_string(edge).unwrap()) {
+                return Err("duplicate locked activation edge".into());
+            }
+            if !packages.contains_key(edge.key.as_str()) {
+                return Err(format!(
+                    "locked activation edge references missing package `{}`",
+                    edge.key
+                ));
+            }
+            manifest_alias(&edge.alias)?;
+        }
+        Ok(())
+    };
+    let mut root_paths = BTreeSet::new();
+    for root in &lockfile.roots {
+        source::validate_subdir(&root.manifest)?;
+        manifest_alias(&root.name)?;
+        if !root_paths.insert(&root.manifest) {
+            return Err("duplicate root manifest in lockfile".into());
+        }
+        source::graph::validate(&root.features, &root.edges)?;
+        validate_edges(&root.edges)?;
+    }
+    for package in &lockfile.packages {
+        validate_edges(&package.edges)?;
+        if !package.edges.is_empty()
+            && package
+                .edges
+                .iter()
+                .map(|e| e.key.clone())
+                .collect::<BTreeSet<_>>()
+                != package.dependencies.iter().cloned().collect()
+        {
+            return Err("locked dependencies disagree with activation edges".into());
+        }
+        if let Some(alias) = &package.import_name {
+            manifest_alias(alias)?;
         }
     }
     let mut indegree: BTreeMap<&str, usize> = packages.keys().map(|name| (*name, 0)).collect();
@@ -276,6 +357,18 @@ fn validate_graph(lockfile: &Lockfile) -> Result<(), String> {
             path.push(current);
             current = predecessor[current];
         }
+    }
+    Ok(())
+}
+
+fn manifest_alias(alias: &str) -> Result<(), String> {
+    if alias.is_empty()
+        || !alias
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b.is_ascii_alphabetic() || b == b'_' || (i > 0 && b.is_ascii_digit()))
+    {
+        return Err("invalid locked import alias".into());
     }
     Ok(())
 }

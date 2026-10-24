@@ -32,19 +32,16 @@ pub fn tree(args: &[String], selection: &crate::project::Selection) -> Result<()
     }
     let options = parse_options(args).map_err(Error::usage)?;
     let _project = selection.enter()?;
-    run_tree(options)
+    run_tree(options, selection.graph.clone())
 }
 
-fn run_tree(options: TreeOptions) -> Result<(), Error> {
+fn run_tree(options: TreeOptions, graph: source::graph::Selection) -> Result<(), Error> {
     let manifest = Manifest::load()?;
-    let root_dependencies = manifest
-        .dependencies
-        .iter()
-        .map(|dependency| dependency.name.clone())
-        .collect::<Vec<_>>();
     let resolution = resolve(
         &manifest,
         ResolveOptions {
+            additional_contexts: Vec::new(),
+            selection: graph,
             dry_run: false,
             update: UpdatePolicy::ReuseLocked,
             locked: options.locked,
@@ -52,14 +49,18 @@ fn run_tree(options: TreeOptions) -> Result<(), Error> {
         },
         ui::status,
     )?;
+    let invert = options.invert.as_deref().map(|requested| {
+        let matching: Vec<_> = resolution.packages().iter().filter(|p| p.name == requested || p.import_name() == requested || p.id.as_deref() == Some(requested)).collect();
+        match matching.as_slice() { [package] => Ok(package.name.as_str()), [] => Ok(requested), _ => Err(Error::resolution("inverse query matches multiple bindings; select a binding key from metadata schema 2")) }
+    }).transpose()?;
     diagnostic::out!(
         "{}",
         render_tree(
             &manifest.name,
             &manifest.version,
-            &root_dependencies,
+            resolution.root_dependencies(),
             resolution.packages(),
-            options.invert.as_deref(),
+            invert,
             options.depth,
         )
         .map_err(Error::resolution)?
@@ -245,10 +246,10 @@ impl TreeRenderer<'_> {
 }
 
 fn package_label(package: &LockedPackage) -> String {
-    let name = if package.name != package.package_name() {
-        format!("{} => {}", package.name, package.package_name())
+    let name = if package.import_name() != package.package_name() {
+        format!("{} => {}", package.import_name(), package.package_name())
     } else {
-        package.name.clone()
+        package.import_name().to_owned()
     };
     match &package.source {
         LockedSource::Path { requested, .. } => {
@@ -294,6 +295,9 @@ mod tests {
         LockedPackage {
             package: None,
             id: None,
+            import_name: None,
+            edges: Vec::new(),
+            features: Default::default(),
             subdir: None,
             name: name.to_string(),
             version: version.to_string(),
@@ -314,6 +318,9 @@ mod tests {
             LockedPackage {
                 package: None,
                 id: None,
+                import_name: None,
+                edges: Vec::new(),
+                features: Default::default(),
                 subdir: None,
                 name: "alpha".to_string(),
                 version: "1.0.0".to_string(),

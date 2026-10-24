@@ -43,7 +43,29 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
             runtime.extend(raw);
             break;
         }
-        if arg == "--quiet" || arg == "-q" {
+        if arg == "--features" || arg.to_str().is_some_and(|s| s.starts_with("--features=")) {
+            let inline = arg
+                .to_str()
+                .and_then(|s| s.strip_prefix("--features="))
+                .map(str::to_owned);
+            let value = inline
+                .or_else(|| raw.next().and_then(|s| s.into_string().ok()))
+                .ok_or_else(|| Error::usage("--features requires a comma-separated list"))?;
+            if value.starts_with('-') || value.split(',').any(str::is_empty) {
+                return Err(Error::usage("empty feature name"));
+            }
+            selection
+                .graph
+                .features
+                .extend(value.split(',').map(str::to_owned));
+        } else if arg == "--no-default-features" {
+            if selection.graph.no_default_features {
+                return Err(Error::usage(
+                    "--no-default-features may only be specified once",
+                ));
+            }
+            selection.graph.no_default_features = true;
+        } else if arg == "--quiet" || arg == "-q" {
             quiet = true;
         } else if arg == "--verbose" || arg == "-v" || arg == "-vv" {
             verbosity = (verbosity + if arg == "-vv" { 2 } else { 1 }).min(2);
@@ -80,6 +102,50 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
         ));
     }
     crate::ui::configure(quiet, verbosity);
+    let graph_command = args.first().is_some_and(|s| {
+        matches!(
+            s.as_str(),
+            "build" | "check" | "run" | "fetch" | "update" | "tree" | "metadata"
+        )
+    });
+    if !graph_command
+        && (!selection.graph.features.is_empty() || selection.graph.no_default_features)
+    {
+        return Err(Error::usage(
+            "feature selection requires a build or dependency graph command",
+        ));
+    }
+    if args
+        .first()
+        .is_some_and(|s| matches!(s.as_str(), "fetch" | "update" | "tree" | "metadata"))
+    {
+        let mut position = 1;
+        while position < args.len() {
+            let value = if args[position] == "--target" {
+                if position + 1 >= args.len() {
+                    return Err(Error::usage("--target requires a triple"));
+                }
+                let value = args.remove(position + 1);
+                args.remove(position);
+                Some(value)
+            } else if let Some(value) = args[position].strip_prefix("--target=") {
+                let value = value.to_owned();
+                args.remove(position);
+                Some(value)
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                if selection.graph.target.is_some() {
+                    return Err(Error::usage("--target may only be specified once"));
+                }
+                selection.graph.target =
+                    Some(source::graph::Context::new(&value).map_err(Error::usage)?);
+            } else {
+                position += 1;
+            }
+        }
+    }
     let command = args.first().map(String::as_str).unwrap_or("help");
     let dry_run = matches!(command, "build" | "check" | "run" | "clean" | "prune")
         && args

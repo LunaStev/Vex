@@ -21,6 +21,7 @@ const ROOT_FIELDS: &[&str] = &[
     "profiles",
     "build",
     "target_config",
+    "features",
 ];
 const DEPENDENCY_FIELDS: &[&str] = &[
     "name",
@@ -33,6 +34,10 @@ const DEPENDENCY_FIELDS: &[&str] = &[
     "subdir",
     "package",
     "version_req",
+    "target",
+    "optional",
+    "features",
+    "default_features",
 ];
 
 pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest, String> {
@@ -44,7 +49,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
         Some(WsonValue::Int(2)) => 2,
         Some(WsonValue::Int(3)) => 3,
         Some(WsonValue::Int(4)) => 4,
-        _ => return Err("unsupported manifest format; expected 1 (legacy), 2 (escaped strings), or 3 (explicit targets)".into()),
+        _ => return Err("unsupported manifest format; expected 1 (legacy), 2 (escaped strings), 3 (explicit targets), or 4 (package graphs)".into()),
     };
     if format < 3 {
         for field in [
@@ -121,6 +126,20 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     let license = parse_optional_string(data.get("license"), "license")?;
     let dependencies = parse_dependencies(data.get("dependencies"), format)?;
 
+    let features = match data.get("features") {
+        Some(value) if format >= 4 => serde_json::from_value(wson::json_value(value)?)
+            .map_err(|e| format!("invalid package features: {e}"))?,
+        Some(_) => return Err("package features require format = 4".into()),
+        None => source::graph::Features::new(),
+    };
+    source::graph::validate(
+        &features,
+        &dependencies
+            .iter()
+            .map(|d| d.edge(d.name.clone()))
+            .collect::<Vec<_>>(),
+    )?;
+
     if let Some(dependency) = dependencies
         .iter()
         .find(|dependency| dependency.name == name)
@@ -147,6 +166,7 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
         author,
         license,
         dependencies,
+        features,
         source_path,
     })
 }
@@ -176,7 +196,39 @@ fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Depe
         let name = required_string(object.get("name"), "dependency field `name`")?;
         validate_dependency_name(&name)?;
         reject_unknown_fields(object, DEPENDENCY_FIELDS, &format!("dependency `{name}`"))?;
-        if !names.insert(name.clone()) {
+        let target = object
+            .get("target")
+            .map(|value| {
+                serde_json::from_value::<source::graph::Predicate>(wson::json_value(value)?)
+                    .map_err(|e| format!("invalid dependency target: {e}"))
+            })
+            .transpose()?;
+        if let Some(target) = &target {
+            target.validate()?;
+        }
+        let optional = graph_bool(object, "optional", false)?;
+        let default_features = graph_bool(object, "default_features", true)?;
+        let features = object
+            .get("features")
+            .map(|value| {
+                serde_json::from_value::<Vec<String>>(wson::json_value(value)?)
+                    .map_err(|e| format!("invalid dependency features: {e}"))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        if format < 4
+            && ["target", "optional", "features", "default_features"]
+                .iter()
+                .any(|key| object.contains_key(*key))
+        {
+            return Err("dependency activation requires format = 4".into());
+        }
+        let declaration = if format >= 4 {
+            format!("{name}:{target:?}")
+        } else {
+            name.clone()
+        };
+        if !names.insert(declaration) {
             return Err(format!("dependency `{name}` is declared more than once"));
         }
 
@@ -277,6 +329,11 @@ fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Depe
             }
         };
         dependencies.push(Dependency {
+            binding_alias: None,
+            target,
+            optional,
+            features,
+            default_features,
             package,
             version_req,
             modern: format >= 4,
@@ -287,6 +344,14 @@ fn parse_dependencies(value: Option<&WsonValue>, format: u32) -> Result<Vec<Depe
         });
     }
     Ok(dependencies)
+}
+
+fn graph_bool(object: &WsonMap, field: &str, default: bool) -> Result<bool, String> {
+    match object.get(field) {
+        None => Ok(default),
+        Some(WsonValue::Bool(value)) => Ok(*value),
+        _ => Err(format!("dependency field `{field}` must be a bool")),
+    }
 }
 
 pub(crate) fn reject_unknown_fields(

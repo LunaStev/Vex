@@ -478,7 +478,22 @@ fn inspect_project(
         );
         return;
     }
-    let resolution = match resolver::inspect(manifest, false, |_, _| {}) {
+    let mut graph_selection = source::graph::Selection::default();
+    if let Some(target) = target {
+        match source::graph::Context::new(target) {
+            Ok(context) => graph_selection.target = Some(context),
+            Err(error) => {
+                report.failure("local_graph", Error::resolution(error));
+                return;
+            }
+        }
+    }
+    let mut resolution = match resolver::inspect_selected(
+        manifest,
+        false,
+        graph_selection.clone(),
+        |_, _| {},
+    ) {
         Ok(resolution) => resolution,
         Err(error) => {
             report.check(
@@ -514,11 +529,6 @@ fn inspect_project(
     };
     let profile = &manifest.profiles["dev"];
     let prerequisite = (|| {
-        for package in resolution.packages() {
-            let directory = package.directory();
-            let manifest = Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?;
-            compiler.validate_version(manifest.compiler.as_deref())?;
-        }
         let spec = compiler.target_spec(target)?;
         Ok(spec["triple"].as_str().unwrap().to_owned())
     })();
@@ -532,6 +542,18 @@ fn inspect_project(
     let mut planned_paths = Vec::new();
     for package_target in targets {
         let result = (|| {
+            let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
+            if let Some(mode) = manifest.platform_for(package_target, &triple).mode {
+                context.mode = mode.as_str().into();
+            }
+            graph_selection.target = Some(context);
+            resolution.activate(&graph_selection)?;
+            for package in resolution.packages() {
+                let directory = package.directory();
+                let manifest = Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?;
+                compiler.validate_version(manifest.compiler.as_deref())?;
+            }
+
             let native = crate::native::prepare_target(
                 manifest,
                 package_target,

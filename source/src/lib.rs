@@ -1,5 +1,6 @@
 //! Git source identity and credential-safe rendering. Transport credentials are
 //! ephemeral; source declarations remain in user-controlled manifests only.
+pub mod graph;
 use std::sync::{Mutex, OnceLock};
 use url::Url;
 

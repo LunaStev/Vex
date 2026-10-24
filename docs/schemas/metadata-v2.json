@@ -23,6 +23,18 @@
     },
     "target_directory": {
       "type": "string"
+    },
+    "selection": {
+      "type": "object"
+    },
+    "selected_features": {
+      "type": "object"
+    },
+    "union_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
     }
   },
   "$defs": {
@@ -225,6 +237,18 @@
         },
         "alias": {
           "type": "string"
+        },
+        "binding": {
+          "type": "string"
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       }
     },

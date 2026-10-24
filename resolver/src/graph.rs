@@ -24,7 +24,7 @@ pub(crate) struct Resolver<'a> {
     visiting: Vec<String>,
     git_selections: HashMap<String, String>,
     status: &'a mut dyn FnMut(&str, String),
-    validate: &'a mut dyn FnMut(&Manifest) -> Result<(), Error>,
+    manifests: BTreeMap<String, Manifest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,7 +56,6 @@ impl<'a> Resolver<'a> {
         root_manifest: PathBuf,
         existing: &'a Lockfile,
         status: &'a mut dyn FnMut(&str, String),
-        validate: &'a mut dyn FnMut(&Manifest) -> Result<(), Error>,
     ) -> Self {
         Self {
             options,
@@ -72,7 +71,7 @@ impl<'a> Resolver<'a> {
             visiting: Vec::new(),
             git_selections: HashMap::new(),
             status,
-            validate,
+            manifests: BTreeMap::new(),
         }
     }
 
@@ -121,8 +120,8 @@ impl<'a> Resolver<'a> {
         self.preflight = true;
     }
 
-    pub(crate) fn into_packages(self) -> Vec<LockedPackage> {
-        self.packages.into_values().collect()
+    pub(crate) fn into_packages(self) -> (Vec<LockedPackage>, BTreeMap<String, Manifest>) {
+        (self.packages.into_values().collect(), self.manifests)
     }
 
     pub(crate) fn validate_selected_packages(&self) -> Result<(), Error> {
@@ -134,7 +133,7 @@ impl<'a> Resolver<'a> {
             .packages
             .values()
             .filter(|package| matches!(package.source, LockedSource::Git { .. }))
-            .map(|package| package.name.as_str())
+            .map(|package| package.import_name())
             .collect::<BTreeSet<_>>();
         let unavailable = selected
             .iter()
@@ -170,16 +169,12 @@ impl<'a> Resolver<'a> {
         &mut self,
         manifest: &Manifest,
     ) -> Result<Vec<String>, Error> {
-        (self.validate)(manifest).map_err(|error| {
-            error
-                .with_field("package", &manifest.name)
-                .with_field("manifest", manifest.source_path.display())
-        })?;
         let mut dependencies = Vec::new();
         let mut edges: Vec<_> = manifest.dependencies.iter().collect();
         edges.sort_by(|a, b| a.name.cmp(&b.name));
         for dependency in edges {
-            self.resolve_dependency(dependency, &manifest.source_path)
+            let key = self
+                .resolve_dependency(dependency, &manifest.source_path)
                 .map_err(|error| {
                     error
                         .with_field("package", &dependency.name)
@@ -190,13 +185,85 @@ impl<'a> Resolver<'a> {
                             manifest.source_path.display()
                         ))
                 })?;
-            dependencies.push(dependency.name.clone());
+            dependencies.push(key);
         }
         dependencies.sort();
         Ok(dependencies)
     }
 
+    fn binding_key(&self, dependency: &Dependency, parent: &Path) -> Result<String, Error> {
+        if !dependency.modern {
+            return Ok(dependency.name.clone());
+        }
+        use sha2::{Digest, Sha256};
+        let source = match &dependency.source {
+            DependencySource::Path { path } => format!(
+                "path:{:?}",
+                crate::paths::portable_path(&relative_to_root(
+                    &self.logical(&self.resolve_path(path, parent)?),
+                    &self.root
+                ))?
+            ),
+            DependencySource::Git {
+                url,
+                branch,
+                tag,
+                rev,
+            } => format!("git:{:?}|{branch:?}|{tag:?}|{rev:?}", source::identity(url)),
+        };
+        Ok(format!(
+            "binding_{:x}",
+            Sha256::digest(
+                format!(
+                    "{:?}|{:?}|{source}|{:?}",
+                    dependency.name,
+                    dependency.package_name(),
+                    dependency.subdir
+                )
+                .as_bytes()
+            )
+        ))
+    }
+    fn edges_for(&self, manifest: &Manifest) -> Result<Vec<source::graph::Edge>, Error> {
+        manifest
+            .dependencies
+            .iter()
+            .map(|dep| Ok(dep.edge(self.binding_key(dep, &manifest.source_path)?)))
+            .collect()
+    }
+    pub(crate) fn root_record(&self, manifest: &Manifest) -> Result<source::graph::Root, Error> {
+        let path = if manifest.source_path.is_absolute() {
+            manifest.source_path.clone()
+        } else {
+            self.root.join(&manifest.source_path)
+        };
+        Ok(source::graph::Root {
+            manifest: crate::paths::portable_path(&relative_to_root(
+                &self.logical(&path),
+                &self.root,
+            ))?,
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            edges: self.edges_for(manifest)?,
+            features: manifest.features.clone(),
+        })
+    }
     fn resolve_dependency(
+        &mut self,
+        dependency: &Dependency,
+        parent: &Path,
+    ) -> Result<String, Error> {
+        let mut binding = dependency.clone();
+        binding.name = self.binding_key(dependency, parent)?;
+        if dependency.modern {
+            binding.binding_alias = Some(dependency.name.clone());
+            binding.package = Some(dependency.package_name().into());
+        }
+        self.resolve_binding(&binding, parent)?;
+        Ok(binding.name)
+    }
+
+    fn resolve_binding(
         &mut self,
         dependency: &Dependency,
         parent_manifest: &Path,
@@ -499,6 +566,14 @@ impl<'a> Resolver<'a> {
             resolved_path
         };
         let manifest_path = resolved_path.join(MANIFEST_FILE);
+        if matches!(locked_source, LockedSource::Git { .. }) && manifest_path.exists() {
+            let actual = manifest_path.canonicalize().map_err(Error::resolution)?;
+            if !actual.starts_with(checkout_path.canonicalize().map_err(Error::resolution)?) {
+                return Err(Error::resolution(
+                    "dependency manifest escapes its Git repository",
+                ));
+            }
+        }
         let package_manifest = Manifest::load_from(&manifest_path).map_err(|e| {
             e.with_field("package", &dependency.name)
                 .with_field("operation", "load dependency manifest")
@@ -525,6 +600,14 @@ impl<'a> Resolver<'a> {
                 dependency.name,
                 library_entry.display()
             )));
+        }
+        if matches!(locked_source, LockedSource::Git { .. }) {
+            let actual = library_entry.canonicalize().map_err(Error::resolution)?;
+            if !actual.starts_with(checkout_path.canonicalize().map_err(Error::resolution)?) {
+                return Err(Error::resolution(
+                    "dependency library entry escapes its Git repository",
+                ));
+            }
         }
         dependency
             .validate_version(&package_manifest.version)
@@ -557,9 +640,21 @@ impl<'a> Resolver<'a> {
             }
         }
 
+        let edges = self.edges_for(&package_manifest)?;
+        self.manifests
+            .insert(dependency.name.clone(), package_manifest.clone());
         self.packages.insert(
             dependency.name.clone(),
             LockedPackage {
+                import_name: dependency
+                    .modern
+                    .then(|| dependency.import_name().to_owned()),
+                edges: if dependency.modern || package_manifest.format >= 4 {
+                    edges
+                } else {
+                    Vec::new()
+                },
+                features: package_manifest.features.clone(),
                 package: dependency.modern.then(|| package_manifest.name.clone()),
                 id: dependency.modern.then(|| {
                     lockfile::package_identity(
@@ -596,7 +691,7 @@ impl<'a> Resolver<'a> {
         if !self.options.locked && !self.options.dry_run && selected.is_some() {
             return selected;
         }
-        if !self.preflight && self.options.update.updates(&dependency.name) {
+        if !self.preflight && self.options.update.updates(dependency.import_name()) {
             None
         } else {
             self.existing
@@ -757,7 +852,9 @@ impl<'a> Resolver<'a> {
             git::RepositoryState::Initialized => {
                 "long-path checkout was initialized without objects"
             }
-            git::RepositoryState::Existing if self.options.update.updates(&dependency.name) => {
+            git::RepositoryState::Existing
+                if self.options.update.updates(dependency.import_name()) =>
+            {
                 "explicit update requires refreshed remote refs"
             }
             git::RepositoryState::Existing => {
