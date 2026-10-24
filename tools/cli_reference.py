@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: MPL-2.0
 """Generate or verify the command reference against the actual CLI help."""
 import argparse
+import json
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = ['', 'init', 'build', 'check', 'run', 'fetch', 'update', 'info', 'tree', 'metadata', 'doctor', 'clean', 'prune', 'setup']
+COMMANDS = [''] + [command['name'] for command in json.loads((ROOT/'tools/command-spec.json').read_text(encoding='utf-8'))['commands']]
 
 
 def render(binary):
@@ -25,6 +26,19 @@ if __name__ == '__main__':
     parser.add_argument('--write', action='store_true')
     args = parser.parse_args()
     text = render(args.vex.resolve())
+    for shell in ['bash', 'zsh', 'fish', 'powershell']:
+        artifact = ROOT/'docs/completions'/f'vex.{shell}'
+        generated = subprocess.check_output([str(args.vex.resolve()), 'completions', shell], text=True)
+        if args.write:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(generated, encoding='utf-8')
+        elif artifact.read_text(encoding='utf-8') != generated:
+            raise SystemExit(f'completion drift: {artifact}')
+    manual = subprocess.check_output([str(args.vex.resolve()), 'manpage'], text=True)
+    if args.write:
+        (ROOT/'docs/vex.1').write_text(manual, encoding='utf-8')
+    elif (ROOT/'docs/vex.1').read_text(encoding='utf-8') != manual:
+        raise SystemExit('manual drift; regenerate CLI references')
     path = ROOT/'docs/commands.md'
     if args.write:
         path.write_text(text, encoding='utf-8')

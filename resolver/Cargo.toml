@@ -16,3 +16,4 @@ lockfile.workspace = true
 state.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+wson.workspace = true

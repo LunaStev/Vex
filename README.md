@@ -597,3 +597,28 @@ contracts, target-specific paths, artifact ownership and runtime prerequisites.
 
 Format 4 projects can share a lockfile and output directory using explicit
 [workspaces](docs/workspaces.md), selected with `-p <package>` or `--workspace`.
+
+Create a separate format 4 project with `vex new app`; invalid inferred names are
+rejected, so use `vex new my-app --name my_app` explicitly. Git initialization is
+opt-in with `--git`. Existing destinations, including empty directories, remain
+untouched. An interrupted scaffold keeps its recovery journal in the new project.
+
+```sh
+vex add utility --path ../utility --offline
+vex add utility --git https://example.org/utility.git --tag v1.0.0
+vex add short_name --git https://example.org/utility.git --package-name utility --version-req '^1'
+vex remove utility --offline
+```
+
+`add`/`remove` change direct dependencies only and preserve unrelated comments and
+formatting. A durable journal coordinates `vex.ws` and the root `vex.lock`;
+failed resolution restores both. A normal `fetch` recovers interrupted edits,
+while dry-run and metadata report pending recovery without modifying files.
+Use `-p <member>` when editing a workspace. Legacy string meaning is preserved;
+values that cannot be represented safely require explicit manifest migration.
+
+The installed binary includes CLI tooling generators, keeping release archives'
+existing layout: `vex completions bash|zsh|fish|powershell` and `vex manpage` print
+installable scripts and the `vex(1)` manual. No compiler or network is queried.
+The checked-in [command reference](docs/commands.md), `docs/completions/`, and
+`docs/vex.1` are generated from `tools/command-spec.json`; CI verifies drift.

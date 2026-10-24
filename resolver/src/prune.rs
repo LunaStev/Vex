@@ -52,6 +52,7 @@ pub fn prune(
         |_, _| {},
         guard,
         &mut |_| Ok(()),
+        true,
     )
     .map_err(|error| {
         error.context("cannot prune before the local graph is prepared; run `vex fetch`")

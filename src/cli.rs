@@ -130,7 +130,9 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
         && !args.first().is_some_and(|s| {
             matches!(
                 s.as_str(),
-                "build"
+                "add"
+                    | "remove"
+                    | "build"
                     | "check"
                     | "run"
                     | "fetch"
@@ -191,12 +193,14 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
         }
     }
     let command = args.first().map(String::as_str).unwrap_or("help");
-    let dry_run = matches!(command, "build" | "check" | "run" | "clean" | "prune")
-        && args
-            .iter()
-            .skip(1)
-            .take_while(|s| s.as_str() != "--")
-            .any(|s| s == "--dry-run");
+    let dry_run = matches!(
+        command,
+        "build" | "check" | "run" | "clean" | "prune" | "cache"
+    ) && args
+        .iter()
+        .skip(1)
+        .take_while(|s| s.as_str() != "--")
+        .any(|s| s == "--dry-run");
     let mut messages = Messages::open(path.as_deref(), command, dry_run)?;
     messages.emit(json!({"event":"started"}))?;
     let result = process::install_handlers()
@@ -278,7 +282,9 @@ fn dispatch(
     if selection.manifest_path.is_some()
         && !matches!(
             args[0].as_str(),
-            "build"
+            "add"
+                | "remove"
+                | "build"
                 | "run"
                 | "check"
                 | "fetch"
@@ -295,7 +301,20 @@ fn dispatch(
             "--manifest-path is only valid for project commands",
         ));
     }
+    if args
+        .iter()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+        && crate::command_spec::help(Some(&args[0]))?
+    {
+        return Ok(Outcome::success());
+    }
     match args[0].as_str() {
+        "new" => crate::commands::new::new(&args[1..]).map(|()| Outcome::success()),
+        "add" | "remove" => crate::commands::edit::edit(args[0] == "remove", &args[1..], selection)
+            .map(|()| Outcome::success()),
+        "completions" => crate::command_spec::completions(&args[1..]).map(|()| Outcome::success()),
+        "manpage" => crate::command_spec::manpage(&args[1..]).map(|()| Outcome::success()),
         "cache" => crate::commands::cache::cache(&args[1..]).map(|()| Outcome::success()),
         "init" => init(&args[1..]).map(|()| Outcome::success()),
         "build" => build(BuildMode::Build, &args[1..], runtime, selection, messages),
@@ -345,41 +364,5 @@ fn print_version() -> Result<(), diagnostic::Error> {
 }
 
 fn print_help() -> Result<(), diagnostic::Error> {
-    diagnostic::outln!("Vex - Wave package manager");
-    diagnostic::outln!();
-    diagnostic::outln!("Usage:");
-    diagnostic::outln!(
-        "  vex [-q|--quiet] [-v|--verbose] [--message-file <new-path>] [--manifest-path <vex.ws>] <command> [options]"
-    );
-    diagnostic::outln!("  vex init [--lib]");
-    diagnostic::outln!(
-        "  vex build [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]"
-    );
-    diagnostic::outln!(
-        "  vex run [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline] [-- <args...>]"
-    );
-    diagnostic::outln!(
-        "  vex check [--lib] [--bin <name>] [--target <triple>] [--profile <name>|--release] [--dry-run] [--locked] [--offline]"
-    );
-    diagnostic::outln!("  vex fetch [--locked] [--offline]");
-    diagnostic::outln!("  vex update [<package>...]");
-    diagnostic::outln!("  vex info");
-    diagnostic::outln!(
-        "  vex metadata [--format=json] [--format-version <1|2>] [--locked] [--offline]"
-    );
-    diagnostic::outln!("  vex tree [--invert <name>] [--depth <n>] [--locked] [--offline]");
-    diagnostic::outln!("  vex clean [--dry-run]");
-    diagnostic::outln!("  vex prune [--apply] [--dry-run]");
-    diagnostic::outln!("  vex doctor [--format=json] [--target <triple>]");
-    diagnostic::outln!("  vex setup wavec [--version <version>] [--script-fallback]");
-    diagnostic::outln!("  vex --version");
-    diagnostic::outln!();
-    diagnostic::outln!("Output:");
-    diagnostic::outln!(
-        "  -q, --quiet    Hide Vex progress; keep results, warnings, errors, and program output"
-    );
-    diagnostic::outln!(
-        "  -v, --verbose  Show decisions; repeat (-vv) for redacted diagnostic detail"
-    );
-    Ok(())
+    crate::command_spec::help(None).map(|_| ())
 }

@@ -557,6 +557,7 @@ dependencies = [
  "sha2",
  "source",
  "state",
+ "wson",
 ]
 
 [[package]]
@@ -807,6 +808,7 @@ dependencies = [
  "source",
  "state",
  "toolchain",
+ "wson",
 ]
 
 [[package]]

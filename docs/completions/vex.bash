@@ -1,0 +1,3 @@
+# Generated from command-spec.json
+_vex() { COMPREPLY=( $(compgen -W '-- --apply --bin --branch --depth --dry-run --features --format-version --format=json --git --invert --lib --locked --manifest-path --message-file --name --no-default-features --offline --package --package-name --path --profile --quiet --release --rev --script-fallback --subdir --tag --target --verbose --version --version-req --workspace -p -q -v add build cache check clean completions doctor fetch info init manpage metadata new prune remove run setup tree update' -- "${COMP_WORDS[COMP_CWORD]}") ); }
+complete -F _vex vex

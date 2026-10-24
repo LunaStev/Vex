@@ -1,6 +1,7 @@
 //! Token-aware WSON boundary shared by manifests and lockfiles.
 //! Legacy strings retain their backslashes; only explicitly versioned input
 //! decodes JSON escapes. The upstream parser is used for scalar literals only.
+pub mod edit;
 pub use wson_rs::{WsonMap, WsonValue};
 
 /// Both file reads and in-memory parser entry points enforce this bound.

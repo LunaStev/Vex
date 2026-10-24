@@ -27,7 +27,8 @@ pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), Error>
                 "recovery",
                 "run a normal project command to recover; preserve user edits",
             )
-    })
+    })?;
+    state::edit::recover(guard.root(), dry_run).map_err(Error::environment)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -305,7 +306,7 @@ where
         "Trace",
         "project lease: acquired before reading vex.lock".into(),
     );
-    resolve_guarded(manifest, options, status, guard, &mut validate)
+    resolve_guarded(manifest, options, status, guard, &mut validate, true)
 }
 
 /// Inspect only the existing local graph under a read-only shared lease.
@@ -349,7 +350,7 @@ pub fn inspect_selected(
         "Trace",
         "project lease: acquired before reading vex.lock".into(),
     );
-    resolve_guarded(manifest, options, status, guard, &mut |_| Ok(())).map_err(|e| {
+    resolve_guarded(manifest, options, status, guard, &mut |_| Ok(()), true).map_err(|e| {
         Error::new(
             e.category,
             format!("{e}\nhelp: run `vex fetch` to prepare the local graph"),
@@ -392,8 +393,16 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     mut status: F,
     guard: state::Guard,
     validate: &mut dyn FnMut(&Manifest) -> Result<(), Error>,
+    recover: bool,
 ) -> Result<Resolution, Error> {
-    recover_project(&guard, options.dry_run)?;
+    if recover {
+        recover_project(&guard, options.dry_run)?;
+    }
+    // Official edits only change dependency spans. Reload them after acquiring
+    // the lease so no command uses an old manifest with a newly published lock.
+    let mut refreshed = Manifest::load_from(&manifest.source_path)?;
+    refreshed.scope = manifest.scope.clone();
+    let manifest = &refreshed;
     let existing = read_lockfile()?;
     let missing_lockfile = existing.is_none();
     status(
@@ -694,6 +703,10 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     }
 
     if let Some(transaction) = transaction {
+        if needs_lockfile {
+            state::edit::expect_lock(guard.root(), lockfile::encode(resolved.clone()))
+                .map_err(Error::environment)?;
+        }
         status(
             "Trace",
             format!(
@@ -717,4 +730,55 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         selected_features,
         _guard: guard,
     })
+}
+
+/// Edit a direct dependency and resolve the pair under one exclusive lease.
+pub fn edit_manifest(
+    manifest: &Manifest,
+    offline: bool,
+    transform: impl FnOnce(&Manifest, &str) -> Result<String, Error>,
+    mut status: impl FnMut(&str, String),
+) -> Result<(), Error> {
+    let guard = state::Guard::acquire(false, &mut status).map_err(Error::environment)?;
+    recover_project(&guard, false)?;
+    let mut current = Manifest::load_from(&manifest.source_path)?;
+    current.scope = manifest.scope.clone();
+    let raw = wson::read_document(&current.source_path)?;
+    let next = transform(&current, &raw)?;
+    // Validate before starting the durable edit.
+    manifest::decode(&next, current.source_path.clone()).map_err(Error::resolution)?;
+    state::edit::begin(&guard, &current.source_path, next).map_err(Error::environment)?;
+    #[cfg(debug_assertions)]
+    if std::env::var_os("VEX_TEST_EDIT_CRASH_MANIFEST").is_some() {
+        std::process::exit(99);
+    }
+    match resolve_guarded(
+        &current,
+        ResolveOptions {
+            offline,
+            ..Default::default()
+        },
+        &mut status,
+        guard,
+        &mut |_| Ok(()),
+        false,
+    ) {
+        Ok(resolution) => {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("VEX_TEST_EDIT_CRASH_LOCK").is_some() {
+                std::process::exit(99);
+            }
+            state::edit::commit(&resolution._guard).map_err(Error::environment)
+        }
+        Err(error) => {
+            let guard = state::Guard::acquire(false, &mut status).map_err(Error::environment)?;
+            recover_project(&guard, false)?;
+            Err(error)
+        }
+    }
+}
+
+/// The same sanitized Git environment is used by explicit project creation.
+pub fn project_git_command() -> std::process::Command {
+    git::command()
 }

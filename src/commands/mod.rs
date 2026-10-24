@@ -14,3 +14,6 @@ pub mod metadata;
 pub mod prune;
 
 pub mod cache;
+
+pub mod edit;
+pub mod new;
