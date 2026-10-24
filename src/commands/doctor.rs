@@ -148,7 +148,7 @@ pub fn doctor(args: &[String], selection: &crate::project::Selection) -> Result<
         project
             .map(|project| {
                 let path = path_text(&project.manifest_path)?;
-                let manifest = Manifest::load()?;
+                let manifest = project.primary();
                 Ok((project, path, manifest))
             })
             .transpose()
@@ -217,19 +217,21 @@ pub fn doctor(args: &[String], selection: &crate::project::Selection) -> Result<
         );
     }
     match project {
-        Ok(Some((_project, path, manifest))) => {
+        Ok(Some((project, path, manifest))) => {
             report.check(
                 "project", "ok", false, &format!("{} at {path}", manifest.name),
                 json!({"manifest_path":path, "name":manifest.name, "manifest_format":manifest.format}),
             );
-            inspect_project(
-                &mut report,
-                &manifest,
-                compiler.as_mut(),
-                compatible_target,
-                target.as_deref(),
-                &host,
-            );
+            for member in &project.selected {
+                inspect_project(
+                    &mut report,
+                    member,
+                    compiler.as_mut(),
+                    compatible_target,
+                    target.as_deref(),
+                    &host,
+                );
+            }
         }
         Ok(None) => {
             report.check(
@@ -547,7 +549,7 @@ fn inspect_project(
                 context.mode = mode.as_str().into();
             }
             graph_selection.target = Some(context);
-            resolution.activate(&graph_selection)?;
+            resolution.activate_root(&manifest.source_path, &graph_selection)?;
             for package in resolution.packages() {
                 let directory = package.directory();
                 let manifest = Manifest::load_from(directory.join(manifest::MANIFEST_FILE))?;

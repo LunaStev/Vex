@@ -1,5 +1,5 @@
 use diagnostic::Error;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use lockfile::{LockedPackage, LockedSource, Lockfile, LOCKFILE_NAME};
@@ -8,11 +8,12 @@ use manifest::{Dependency, DependencySource, Manifest, MANIFEST_FILE};
 use crate::git;
 use crate::paths::{relative_to_root, resolve_path};
 use crate::transaction::Transaction;
-use crate::{ResolveOptions, UpdatePolicy};
+use crate::ResolveOptions;
 
 pub(crate) struct Resolver<'a> {
     options: ResolveOptions,
     preflight: bool,
+    updating: bool,
     root: PathBuf,
     transaction: Option<&'a Transaction>,
     root_name: String,
@@ -60,6 +61,7 @@ impl<'a> Resolver<'a> {
         Self {
             options,
             preflight: false,
+            updating: true,
             root,
             transaction,
             root_name,
@@ -124,45 +126,8 @@ impl<'a> Resolver<'a> {
         (self.packages.into_values().collect(), self.manifests)
     }
 
-    pub(crate) fn validate_selected_packages(&self) -> Result<(), Error> {
-        let UpdatePolicy::UpdateSelected(selected) = &self.options.update else {
-            return Ok(());
-        };
-
-        let available = self
-            .packages
-            .values()
-            .filter(|package| matches!(package.source, LockedSource::Git { .. }))
-            .map(|package| package.import_name())
-            .collect::<BTreeSet<_>>();
-        let unavailable = selected
-            .iter()
-            .filter(|name| !available.contains(name.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-
-        if unavailable.is_empty() {
-            return Ok(());
-        }
-
-        let requested = unavailable
-            .iter()
-            .map(|name| format!("`{name}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let package_label = if unavailable.len() == 1 {
-            "package"
-        } else {
-            "packages"
-        };
-        let available = if available.is_empty() {
-            "<none>".to_string()
-        } else {
-            available.into_iter().collect::<Vec<_>>().join(", ")
-        };
-        Err(Error::resolution(format!(
-            "cannot update {package_label} {requested}: one or more requested names are not Git dependencies in the current graph\nhelp: available Git packages: {available}\nhelp: run `vex update <package>...` using one or more available package names"
-        )))
+    pub(crate) fn set_updating(&mut self, value: bool) {
+        self.updating = value;
     }
 
     pub(crate) fn resolve_manifest_dependencies(
@@ -192,7 +157,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn binding_key(&self, dependency: &Dependency, parent: &Path) -> Result<String, Error> {
-        if !dependency.modern {
+        if !dependency.modern && !self.options.force_bindings {
             return Ok(dependency.name.clone());
         }
         use sha2::{Digest, Sha256};
@@ -255,7 +220,8 @@ impl<'a> Resolver<'a> {
     ) -> Result<String, Error> {
         let mut binding = dependency.clone();
         binding.name = self.binding_key(dependency, parent)?;
-        if dependency.modern {
+        if dependency.modern || self.options.force_bindings {
+            binding.modern = true;
             binding.binding_alias = Some(dependency.name.clone());
             binding.package = Some(dependency.package_name().into());
         }
@@ -684,36 +650,53 @@ impl<'a> Resolver<'a> {
         else {
             return None;
         };
-        let selected = self
-            .git_selections
+        let pinned = self.existing_git(dependency).and_then(|package| {
+            if let LockedSource::Git { commit, .. } = &package.source {
+                Some(commit.clone())
+            } else {
+                None
+            }
+        });
+        if self.preflight || self.options.dry_run || self.options.locked {
+            return pinned;
+        }
+        if !(self.updating
+            && self
+                .options
+                .updates_binding(&dependency.name, dependency.import_name()))
+            && pinned.is_some()
+        {
+            return pinned;
+        }
+        self.git_selections
             .get(&format!("{url:?}|{branch:?}|{tag:?}|{rev:?}"))
-            .cloned();
-        if !self.options.locked && !self.options.dry_run && selected.is_some() {
-            return selected;
+            .cloned()
+    }
+
+    fn existing_git(&self, dependency: &Dependency) -> Option<&LockedPackage> {
+        let DependencySource::Git {
+            url,
+            branch,
+            tag,
+            rev,
+        } = &dependency.source
+        else {
+            return None;
+        };
+        let matches = |package: &&LockedPackage| {
+            package.import_name() == dependency.import_name()
+                && package.package_name() == dependency.package_name()
+                && package.subdir == dependency.subdir
+                && matches!(&package.source, LockedSource::Git { url: old, branch: b, tag: t, rev: r, .. } if source::identity(old) == source::identity(url) && b == branch && t == tag && r == rev)
+        };
+        if let Some(package) = self
+            .existing
+            .package(&dependency.name)
+            .filter(|p| matches(p))
+        {
+            return Some(package);
         }
-        if !self.preflight && self.options.update.updates(dependency.import_name()) {
-            None
-        } else {
-            self.existing
-                .package(&dependency.name)
-                .and_then(|package| match &package.source {
-                    LockedSource::Git {
-                        url: locked_url,
-                        branch: locked_branch,
-                        tag: locked_tag,
-                        rev: locked_rev,
-                        commit,
-                        ..
-                    } if source::identity(locked_url) == source::identity(url)
-                        && locked_branch == branch
-                        && locked_tag == tag
-                        && locked_rev == rev =>
-                    {
-                        Some(commit.clone())
-                    }
-                    _ => None,
-                })
-        }
+        self.existing.packages.iter().find(matches)
     }
 
     fn resolve_git_commit(
@@ -758,6 +741,31 @@ impl<'a> Resolver<'a> {
             return Ok(commit);
         }
 
+        // Entering a workspace changes binding layout, not an unchanged Git
+        // selection. Import old managed objects without discarding user edits.
+        if !destination.exists() {
+            if let (Some(commit), Some(old)) = (&locked, self.existing_git(dependency)) {
+                if let LockedSource::Git { resolved, .. } = &old.source {
+                    manifest::validate_package_name(&old.name).map_err(Error::resolution)?;
+                    let legacy = PathBuf::from(".vex/deps").join(&old.name);
+                    let encoded =
+                        PathBuf::from(".vex/deps").join(crate::paths::checkout_name(&old.name));
+                    if resolved != &legacy && resolved != &encoded {
+                        return Err(Error::resolution(
+                            "invalid historical managed checkout path",
+                        ));
+                    }
+                    let old_path = self.root.join(resolved);
+                    if old_path.exists() {
+                        git::verify_origin(&old_path, url)?;
+                        git::reject_dirty_checkout(&old_path, dependency.import_name())?;
+                        if git::has_commit(&old_path, commit)? {
+                            crate::cache::store(&old_path, url, commit)?;
+                        }
+                    }
+                }
+            }
+        }
         if let Some(commit) = &locked {
             if (!destination.join(".git").exists() || !git::has_commit(destination, commit)?)
                 && crate::cache::restore(destination, url, commit)?
@@ -853,7 +861,10 @@ impl<'a> Resolver<'a> {
                 "long-path checkout was initialized without objects"
             }
             git::RepositoryState::Existing
-                if self.options.update.updates(dependency.import_name()) =>
+                if (self.updating
+                    && self
+                        .options
+                        .updates_binding(&dependency.name, dependency.import_name())) =>
             {
                 "explicit update requires refreshed remote refs"
             }

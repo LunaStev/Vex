@@ -39,6 +39,9 @@ pub fn prune(
     let resolution = resolve_guarded(
         manifest,
         ResolveOptions {
+            requests: Vec::new(),
+            update_bindings: None,
+            force_bindings: false,
             additional_contexts: Vec::new(),
             selection: Default::default(),
             dry_run: true,

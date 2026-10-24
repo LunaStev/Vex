@@ -43,7 +43,26 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
             runtime.extend(raw);
             break;
         }
-        if arg == "--features" || arg.to_str().is_some_and(|s| s.starts_with("--features=")) {
+        if arg == "-p"
+            || arg == "--package"
+            || arg.to_str().is_some_and(|s| s.starts_with("--package="))
+        {
+            let inline = arg
+                .to_str()
+                .and_then(|s| s.strip_prefix("--package="))
+                .map(str::to_owned);
+            let value = inline
+                .or_else(|| raw.next().and_then(|s| s.into_string().ok()))
+                .filter(|s| !s.is_empty() && !s.starts_with('-'))
+                .ok_or_else(|| Error::usage("--package requires a package name"))?;
+            selection.packages.push(value);
+        } else if arg == "--workspace" {
+            if selection.all_packages {
+                return Err(Error::usage("--workspace may only be specified once"));
+            }
+            selection.all_packages = true;
+        } else if arg == "--features" || arg.to_str().is_some_and(|s| s.starts_with("--features="))
+        {
             let inline = arg
                 .to_str()
                 .and_then(|s| s.strip_prefix("--features="))
@@ -102,6 +121,31 @@ fn run_reported() -> Result<i32, diagnostic::Error> {
         ));
     }
     crate::ui::configure(quiet, verbosity);
+    if selection.all_packages && !selection.packages.is_empty() {
+        return Err(Error::usage(
+            "--workspace cannot be combined with --package",
+        ));
+    }
+    if (selection.all_packages || !selection.packages.is_empty())
+        && !args.first().is_some_and(|s| {
+            matches!(
+                s.as_str(),
+                "build"
+                    | "check"
+                    | "run"
+                    | "fetch"
+                    | "update"
+                    | "tree"
+                    | "metadata"
+                    | "info"
+                    | "doctor"
+            )
+        })
+    {
+        return Err(Error::usage(
+            "package selection requires a workspace project command",
+        ));
+    }
     let graph_command = args.first().is_some_and(|s| {
         matches!(
             s.as_str(),

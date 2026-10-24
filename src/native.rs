@@ -405,6 +405,11 @@ fn prepare_settings(
         .unwrap_or_else(|| PathBuf::from("target"))
         .join(triple)
         .join(profile);
+    let directory = if root.scope.is_some() {
+        directory.join("packages").join(&root.name)
+    } else {
+        directory
+    };
     let output_directory = directory.join(if target.kind == TargetKind::Library {
         "lib"
     } else {

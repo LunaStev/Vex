@@ -17,7 +17,7 @@ pub enum BuildMode {
     Check,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct VexBuildOptions {
     target: Option<String>,
     release: bool,
@@ -43,10 +43,9 @@ pub fn build(
     let options = parse_vex_build_options(mode, args).map_err(Error::usage)?;
     let compiler = Compiler::select();
     let _project = selection.enter()?;
-    let manifest = Manifest::load()?;
     run_build(
         mode,
-        &manifest,
+        &_project.selected,
         options,
         runtime,
         compiler,
@@ -55,84 +54,154 @@ pub fn build(
     )
 }
 
+struct MemberBuild {
+    manifest: Manifest,
+    targets: Vec<PackageTarget>,
+}
+struct PlannedTarget {
+    package: String,
+    manifest_path: PathBuf,
+    directory: PathBuf,
+    target: PackageTarget,
+    plan: compiler::PreparedBuild,
+}
 fn run_build(
     mode: BuildMode,
-    manifest: &Manifest,
+    manifests: &[Manifest],
     options: VexBuildOptions,
     runtime: &[std::ffi::OsString],
     compiler: Result<Compiler, Error>,
     messages: &mut Messages,
-    mut graph_selection: source::graph::Selection,
+    graph_selection: source::graph::Selection,
 ) -> Result<Outcome, Error> {
     let started = Instant::now();
     let root = std::env::current_dir().map_err(Error::environment)?;
     root.to_str().ok_or_else(|| {
         Error::resolution("wavec JSON protocol cannot represent a non-UTF-8 project root")
     })?;
-    let selected = select_targets(manifest, mode, &options)?;
+    let requested_selection = options.library || !options.binaries.is_empty();
+    if manifests.len() > 1 {
+        for name in &options.binaries {
+            if !manifests.iter().any(|m| {
+                m.targets
+                    .iter()
+                    .any(|t| t.kind == TargetKind::Binary && t.name == *name)
+            }) {
+                return Err(Error::resolution(format!("unknown binary target `{name}`")));
+            }
+        }
+    }
+    let mut members = Vec::new();
+    for manifest in manifests {
+        let mut local = options.clone();
+        if manifests.len() > 1 {
+            local.library &= manifest.lib;
+            local.binaries.retain(|name| {
+                manifest
+                    .targets
+                    .iter()
+                    .any(|t| t.kind == TargetKind::Binary && t.name == *name)
+            });
+            if requested_selection && !local.library && local.binaries.is_empty() {
+                continue;
+            }
+            if mode == BuildMode::Run
+                && !manifest
+                    .targets
+                    .iter()
+                    .any(|t| t.kind == TargetKind::Binary)
+            {
+                continue;
+            }
+        }
+        let targets = select_targets(manifest, mode, &local)?
+            .into_iter()
+            .cloned()
+            .collect();
+        members.push(MemberBuild {
+            manifest: manifest.clone(),
+            targets,
+        });
+    }
+    if members.is_empty() {
+        return Err(Error::resolution("no package targets match the selection"));
+    }
+    if mode == BuildMode::Run && (members.len() != 1 || members[0].targets.len() != 1) {
+        return Err(Error::resolution("vex run requires one binary across the selected packages; use -p <package> and --bin <name>"));
+    }
+    let selected_paths: Vec<_> = members
+        .iter()
+        .map(|m| m.manifest.source_path.clone())
+        .collect();
     let profile_name =
         options
             .profile
             .as_deref()
             .unwrap_or(if options.release { "release" } else { "dev" });
-    let profile = manifest.profile(profile_name).map_err(Error::resolution)?;
-    for target in &selected {
-        validate_entry(manifest, target)?;
+    for member in &mut members {
+        if let Some(scope) = &mut member.manifest.scope {
+            scope.selected = selected_paths.clone();
+        }
+        member
+            .manifest
+            .profile(profile_name)
+            .map_err(Error::resolution)?;
+        for target in &member.targets {
+            validate_entry(&member.manifest, target)?;
+        }
     }
+    let primary = &members[0].manifest;
     let mut selected_compiler = compiler?;
     let compiler = &mut selected_compiler;
     let requested_triple = options
         .target
         .as_deref()
-        .or(manifest.build_target.as_deref());
+        .or(primary.build_target.as_deref());
     if let Some(target) = requested_triple {
         compiler.validate_target(target)?;
     }
-    compiler.validate_version(manifest.compiler.as_deref())?;
-    // Recovery has precedence over target-capability queries. Resolution takes
-    // its own lease and rechecks recovery after this query, so a concurrent
-    // transaction cannot expose sources without coordination.
+    for member in &members {
+        compiler.validate_version(member.manifest.compiler.as_deref())?;
+    }
     let recovery_guard =
         state::Guard::acquire(options.dry_run, ui::status).map_err(Error::environment)?;
     resolver::recover_project(&recovery_guard, options.dry_run)?;
     drop(recovery_guard);
     let spec = compiler.target_spec(requested_triple)?;
     let triple = spec["triple"].as_str().unwrap().to_owned();
-    let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
-    if let Some(mode) = manifest.platform_for(selected[0], &triple).mode {
-        context.mode = mode.as_str().into();
+    let mut requests = Vec::new();
+    for member in &members {
+        for target in &member.targets {
+            let mut selection = graph_selection.clone();
+            let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
+            if let Some(mode) = member.manifest.platform_for(target, &triple).mode {
+                context.mode = mode.as_str().into();
+            }
+            selection.target = Some(context);
+            requests.push(resolver::ActivationRequest {
+                manifest: resolver::manifest_key(&member.manifest.source_path)?,
+                selection,
+            });
+        }
     }
-    graph_selection.target = Some(context);
     let mut resolution = resolve_validated(
-        manifest,
+        primary,
         ResolveOptions {
-            additional_contexts: selected
-                .iter()
-                .map(|target| {
-                    let mut context =
-                        source::graph::Context::new(&triple).map_err(Error::resolution)?;
-                    if let Some(mode) = manifest.platform_for(target, &triple).mode {
-                        context.mode = mode.as_str().into();
-                    }
-                    Ok(context)
-                })
-                .collect::<Result<_, Error>>()?,
+            requests,
             selection: graph_selection.clone(),
             dry_run: options.dry_run,
             update: UpdatePolicy::ReuseLocked,
             locked: options.locked,
             offline: options.offline,
+            ..Default::default()
         },
         ui::status,
         |candidate| compiler.validate_version(candidate.compiler.as_deref()),
     )?;
     ui::verbose(format!("target: {triple}"));
     ui::verbose(format!("compiler: {}", compiler.path().display()));
-    ui::trace(format!(
-        "build options: {options:?}; compiler plan is queried for each selected package target"
-    ));
     ui::verbose(format!(
-        "resolved {} dependencies",
+        "resolved {} dependency bindings",
         resolution.package_count()
     ));
     if mode == BuildMode::Run
@@ -160,94 +229,113 @@ fn run_build(
     let mut prepared = Vec::new();
     let reporting = messages.enabled();
     messages.status("compiler")?;
-    for target in &selected {
-        let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
-        if let Some(mode) = manifest.platform_for(target, &triple).mode {
-            context.mode = mode.as_str().into();
+    for member in &members {
+        let profile = member
+            .manifest
+            .profile(profile_name)
+            .map_err(Error::resolution)?;
+        let directory = member
+            .manifest
+            .source_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .map_err(Error::environment)?;
+        for target in &member.targets {
+            let mut selection = graph_selection.clone();
+            let mut context = source::graph::Context::new(&triple).map_err(Error::resolution)?;
+            if let Some(mode) = member.manifest.platform_for(target, &triple).mode {
+                context.mode = mode.as_str().into();
+            }
+            selection.target = Some(context);
+            resolution.activate_root(&member.manifest.source_path, &selection)?;
+            let configuration = crate::native::prepare_target(
+                &member.manifest,
+                target,
+                &resolution,
+                compiler,
+                &triple,
+                profile_name,
+                mode == BuildMode::Check,
+                generation.as_deref(),
+            )?;
+            let mut args = resolution.dependency_args()?;
+            if target.kind == TargetKind::Binary && member.manifest.lib {
+                args.push(format!(
+                    "--dep={}={}",
+                    member.manifest.name,
+                    input_string(&directory)?
+                ));
+            }
+            args.push(format!("-O{}", profile.opt_level));
+            args.extend(configuration.global);
+            args.push("build".into());
+            args.push(input_string(&target.path)?);
+            if mode == BuildMode::Run {
+                args.push("--run".into());
+            }
+            if mode == BuildMode::Check {
+                args.push("--emit=check".into());
+            }
+            args.extend(configuration.inputs);
+            args.extend(configuration.output);
+            let identity = json!({"name":target.name,"kind":target.kind.as_str()});
+            let mut report = |mut event: serde_json::Value| {
+                event["package"] = json!(member.manifest.name);
+                event["package_target"] = identity.clone();
+                event["profile"] = json!(profile_name);
+                messages.emit(event)
+            };
+            let plan = prepare_build(
+                compiler,
+                &args,
+                runtime,
+                options.dry_run,
+                generation.as_deref(),
+                if reporting { Some(&mut report) } else { None },
+            )
+            .map_err(|e| target_error(e, target, profile_name))?;
+            prepared.push(PlannedTarget {
+                package: member.manifest.name.clone(),
+                manifest_path: member.manifest.source_path.clone(),
+                directory: directory.clone(),
+                target: target.clone(),
+                plan,
+            });
         }
-        graph_selection.target = Some(context);
-        resolution.activate(&graph_selection)?;
-        let configuration = crate::native::prepare_target(
-            manifest,
-            target,
-            &resolution,
-            compiler,
-            &triple,
-            profile_name,
-            mode == BuildMode::Check,
-            generation.as_deref(),
-        )?;
-        let mut args = resolution.dependency_args()?;
-        if target.kind == TargetKind::Binary && manifest.lib {
-            args.push(format!("--dep={}={}", manifest.name, root.display()));
-        }
-        args.push(format!("-O{}", profile.opt_level));
-        args.extend(configuration.global);
-        args.push("build".into());
-        args.push(input_string(&target.path)?);
-        if mode == BuildMode::Run {
-            args.push("--run".into());
-        }
-        if mode == BuildMode::Check {
-            args.push("--emit=check".into());
-        }
-        args.extend(configuration.inputs);
-        args.extend(configuration.output);
-        let identity = json!({"name":target.name,"kind":target.kind.as_str()});
-        let mut report = |mut event: serde_json::Value| {
-            event["package_target"] = identity.clone();
-            event["profile"] = json!(profile_name);
-            messages.emit(event)
-        };
-        let plan = prepare_build(
-            compiler,
-            &args,
-            runtime,
-            options.dry_run,
-            generation.as_deref(),
-            if reporting { Some(&mut report) } else { None },
-        )
-        .map_err(|e| target_error(e, target, profile_name))?;
-        prepared.push((*target, plan));
     }
-    // Even optional linker companions must be disjoint between package targets.
     let paths = prepared
         .iter()
-        .flat_map(|(_, p)| p.output_paths().cloned())
+        .flat_map(|p| p.plan.output_paths().cloned())
         .collect::<Vec<_>>();
     state::artifacts::validate_output_paths(&root, &paths).map_err(Error::compiler)?;
     if options.dry_run {
         ui::verbose("freshness: planning only; compiler will not execute");
-        for (target, _) in &prepared {
+        let plans = prepared.iter().map(|task| json!({"package":task.package,"manifest_path":task.manifest_path,"build_directory":root,"run_directory":if mode == BuildMode::Run { Some(&task.directory) } else { None },"package_target":{"name":task.target.name,"kind":task.target.kind.as_str()},"compiler_plan":task.plan.plan()})).collect::<Vec<_>>();
+        for task in &prepared {
             ui::status(
                 "Planning",
-                format!("{} {}", target.kind.as_str(), target.name),
+                format!(
+                    "{} {} ({})",
+                    task.target.kind.as_str(),
+                    task.target.name,
+                    task.package
+                ),
             );
         }
-        let plans = prepared
-            .iter()
-            .map(|(target, plan)| {
-                json!({
-                    "package_target":{"name":target.name,"kind":target.kind.as_str()},
-                    "compiler_plan":plan.plan()
-                })
-            })
-            .collect::<Vec<_>>();
-        let envelope = json!({"schema":"vex.build-plan","schema_version":1,"target":triple,
-            "profile":{"name":profile_name,"opt_level":profile.opt_level},"plans":plans});
-        diagnostic::outln!(
-            "{}",
-            serde_json::to_string_pretty(&envelope).map_err(Error::internal)?
-        );
+        let profile = primary.profile(profile_name).map_err(Error::resolution)?;
+        diagnostic::outln!("{}", serde_json::to_string_pretty(&json!({"schema":"vex.build-plan","schema_version":1,"target":triple,"profile":{"name":profile_name,"opt_level":profile.opt_level},"plans":plans})).map_err(Error::internal)?);
         return Ok(Outcome::success());
     }
-    for (target, plan) in &prepared {
-        plan.preflight_ownership()
-            .map_err(|e| target_error(e, target, profile_name))?;
+    for task in &prepared {
+        task.plan
+            .preflight_ownership()
+            .map_err(|e| target_error(e, &task.target, profile_name))?;
     }
     ui::verbose("freshness: no build cache; compiling the current project");
     let mut execution = None;
-    for (target, plan) in prepared {
+    for task in prepared {
         ui::status(
             if mode == BuildMode::Check {
                 "Checking"
@@ -255,26 +343,26 @@ fn run_build(
                 "Compiling"
             },
             format!(
-                "{} v{} ({} {})",
-                manifest.name,
-                manifest.version,
-                target.kind.as_str(),
-                target.name
+                "{} ({} {})",
+                task.package,
+                task.target.kind.as_str(),
+                task.target.name
             ),
         );
-        let final_paths = if let Some(path) = plan.plan()["link"]["output"].as_str() {
+        let final_paths = if let Some(path) = task.plan.plan()["link"]["output"].as_str() {
             vec![path.to_owned()]
         } else {
-            plan.plan()["compile"]
+            task.plan.plan()["compile"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .filter_map(|job| job["output"].as_str().map(str::to_owned))
                 .collect()
         };
-        let identity = json!({"name":target.name,"kind":target.kind.as_str()});
-        let artifact_kind = target.output.map(|v| v.as_str()).unwrap_or("binary");
+        let identity = json!({"name":task.target.name,"kind":task.target.kind.as_str()});
+        let artifact_kind = task.target.output.map(|v| v.as_str()).unwrap_or("binary");
         let mut report = |mut event: serde_json::Value| {
+            event["package"] = json!(task.package);
             event["package_target"] = identity.clone();
             event["profile"] = json!(profile_name);
             if event["event"] == "artifact" {
@@ -282,9 +370,11 @@ fn run_build(
             }
             messages.emit(event)
         };
-        execution = plan
+        execution = task
+            .plan
             .execute(compiler, if reporting { Some(&mut report) } else { None })
-            .map_err(|e| target_error(e, target, profile_name))?;
+            .map_err(|e| target_error(e, &task.target, profile_name))?
+            .map(|execution| execution.in_directory(&task.directory));
         for path in final_paths {
             ui::status("Artifact", path);
         }
@@ -292,7 +382,7 @@ fn run_build(
     drop(resolution);
     let mut outcome = Outcome::success();
     if let Some(execution) = execution {
-        ui::status("Running", &selected[0].name);
+        ui::status("Running", &members[0].targets[0].name);
         messages.status("running")?;
         outcome = Outcome::program(execution.execute()?);
     }
@@ -547,9 +637,23 @@ fn build_usage(mode: BuildMode) -> &'static str {
 }
 
 fn input_string(path: &Path) -> Result<String, Error> {
-    path.to_str().map(str::to_owned).ok_or_else(|| {
+    let value = path.to_str().ok_or_else(|| {
         Error::resolution("wavec JSON protocol cannot represent a non-UTF-8 input path")
-    })
+    })?;
+    #[cfg(windows)]
+    {
+        if let Some(value) = value.strip_prefix(r"\\?\UNC\") {
+            return Ok(format!("//{}", value.replace('\\', "/")));
+        }
+        Ok(value
+            .strip_prefix(r"\\?\")
+            .unwrap_or(value)
+            .replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(value.to_owned())
+    }
 }
 
 #[cfg(test)]

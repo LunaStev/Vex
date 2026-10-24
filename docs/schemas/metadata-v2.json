@@ -13,7 +13,14 @@
       "const": 2
     },
     "root": {
-      "$ref": "#/$defs/package"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/package"
+        },
+        {
+          "$ref": "#/$defs/workspace"
+        }
+      ]
     },
     "packages": {
       "type": "array",
@@ -25,7 +32,10 @@
       "type": "string"
     },
     "selection": {
-      "type": "object"
+      "type": [
+        "object",
+        "null"
+      ]
     },
     "selected_features": {
       "type": "object"
@@ -34,6 +44,18 @@
       "type": "array",
       "items": {
         "type": "object"
+      }
+    },
+    "selections": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "workspace_members": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/package"
       }
     }
   },
@@ -330,6 +352,45 @@
         },
         "platform": {
           "$ref": "#/$defs/platform"
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "required": [
+        "kind",
+        "root",
+        "manifest_path",
+        "members",
+        "default_members"
+      ],
+      "properties": {
+        "kind": {
+          "const": "workspace"
+        },
+        "root": {
+          "type": "string"
+        },
+        "manifest_path": {
+          "type": "string"
+        },
+        "package": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     }

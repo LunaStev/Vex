@@ -5,6 +5,8 @@ mod model;
 mod native;
 mod parse;
 mod render;
+pub mod workspace;
+pub use workspace::{Workspace, WorkspaceContext};
 
 pub use model::{
     BinaryOverride, BuildProfile, PackageTarget, PlatformMode, PlatformSettings, Startup,
@@ -71,6 +73,10 @@ pub struct Dependency {
 
 #[derive(Debug, Clone)]
 pub struct Manifest {
+    pub workspace: Option<Workspace>,
+    pub virtual_workspace: bool,
+    pub scope: Option<WorkspaceContext>,
+    pub fields: std::collections::BTreeSet<String>,
     pub format: u32,
     pub compiler: Option<String>,
     pub name: String,

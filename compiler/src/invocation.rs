@@ -9,14 +9,63 @@ use crate::plan;
 /// Compilation ends before this value is returned. No project guard is owned
 /// here: the caller must drop its resolution/guard before calling execute().
 pub struct Execution {
+    directory: PathBuf,
     program: String,
     args: Vec<OsString>,
 }
 impl Execution {
-    pub fn execute(self) -> Result<ExitStatus, Error> {
-        process::status(Command::new(&self.program).args(&self.args), None, true)
-            .map_err(|e| Error::environment(format!("failed to run `{}`: {e}", self.program)))
+    pub fn in_directory(mut self, directory: &Path) -> Self {
+        self.directory = directory.to_owned();
+        self
     }
+    pub fn execute(self) -> Result<ExitStatus, Error> {
+        let program = runner_program(&self.program)?;
+        process::status(
+            Command::new(&program)
+                .args(&self.args)
+                .current_dir(&self.directory),
+            None,
+            true,
+        )
+        .map_err(|e| Error::environment(format!("failed to run `{}`: {e}", self.program)))
+    }
+}
+
+fn runner_program(program: &str) -> Result<PathBuf, Error> {
+    let path = Path::new(program);
+    if path.is_absolute() || path.components().count() > 1 {
+        return Ok(path.to_path_buf());
+    }
+    let root = std::env::current_dir().map_err(Error::environment)?;
+    for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let candidate = root.join(directory).join(path);
+        #[cfg(windows)]
+        let candidate = if candidate.extension().is_none() {
+            candidate.with_extension("exe")
+        } else {
+            candidate
+        };
+        if !candidate.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if fs::metadata(&candidate)
+                .map_err(Error::environment)?
+                .permissions()
+                .mode()
+                & 0o111
+                == 0
+            {
+                continue;
+            }
+        }
+        return Ok(candidate);
+    }
+    Err(Error::environment(format!(
+        "program runner `{program}` is unavailable on PATH"
+    )))
 }
 
 /// A validated compiler plan. Constructing it does not create build outputs.
@@ -187,6 +236,7 @@ pub fn prepare_build(
             String::from_utf8_lossy(&validation_output.stderr)
         ))?;
     }
+    let root = std::env::current_dir().map_err(Error::environment)?;
     let separator = args.iter().position(|a| a == "--").unwrap_or(args.len());
     let is_run = args[..separator].iter().any(|a| a == "--run");
     let execution = if is_run {
@@ -222,11 +272,36 @@ pub fn prepare_build(
                 "runner plan does not reference the generated artifact",
             ));
         }
-        let mut execution_args: Vec<OsString> = run_args.into_iter().map(OsString::from).collect();
+        let absolute_output = root
+            .join(output)
+            .to_str()
+            .ok_or_else(|| Error::resolution("run output requires a UTF-8 path"))?
+            .to_owned();
+        let executable = if program == output {
+            absolute_output.clone()
+        } else if Path::new(&program).components().count() > 1 {
+            root.join(&program)
+                .to_str()
+                .ok_or_else(|| Error::resolution("runner path requires UTF-8"))?
+                .to_owned()
+        } else {
+            program.clone()
+        };
+        let mut execution_args: Vec<OsString> = run_args
+            .into_iter()
+            .map(|arg| {
+                OsString::from(if arg == output {
+                    absolute_output.clone()
+                } else {
+                    arg
+                })
+            })
+            .collect();
         execution_args.extend_from_slice(runtime);
         Some((
             Execution {
-                program,
+                directory: root.clone(),
+                program: executable,
                 args: execution_args,
             },
             PathBuf::from(output),

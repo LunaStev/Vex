@@ -41,7 +41,7 @@ fn main() {
             let mut line = String::new(); std::io::stdin().read_line(&mut line).unwrap();
             print!("PROGRAM_STDIN:{line}"); eprintln!("PROGRAM_STDERR");
         }
-        println!("PROGRAM_CWD:{:?}", env::current_dir().unwrap());
+        println!("PROGRAM_CWD:{:?}", env::current_dir().unwrap().canonicalize().unwrap());
         #[cfg(unix)]
         if env::var_os("VEX_TEST_ARGUMENT_BYTES").is_some() {
             use std::os::unix::ffi::OsStrExt;

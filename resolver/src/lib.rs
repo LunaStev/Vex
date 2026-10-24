@@ -14,6 +14,7 @@ mod paths;
 mod prune;
 mod transaction;
 
+pub use activation::{root_identity, Request as ActivationRequest, View as RootView};
 pub use cache::prune as prune_cache;
 pub use prune::{prune, PruneEntry, PruneReport};
 
@@ -31,12 +32,23 @@ pub fn recover_project(guard: &state::Guard, dry_run: bool) -> Result<(), Error>
 
 #[derive(Clone, Debug, Default)]
 pub struct ResolveOptions {
+    pub requests: Vec<ActivationRequest>,
+    pub update_bindings: Option<BTreeSet<String>>,
+    pub force_bindings: bool,
     pub additional_contexts: Vec<source::graph::Context>,
     pub selection: source::graph::Selection,
     pub dry_run: bool,
     pub update: UpdatePolicy,
     pub locked: bool,
     pub offline: bool,
+}
+
+impl ResolveOptions {
+    pub(crate) fn updates_binding(&self, key: &str, alias: &str) -> bool {
+        self.update_bindings
+            .as_ref()
+            .map_or_else(|| self.update.updates(alias), |keys| keys.contains(key))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -66,6 +78,9 @@ pub struct Resolution {
     packages: Vec<LockedPackage>,
     union: Vec<LockedPackage>,
     root: source::graph::Root,
+    roots: Vec<source::graph::Root>,
+    requests: Vec<ActivationRequest>,
+    views: Vec<RootView>,
     selection: source::graph::Selection,
     selected_edges: Vec<String>,
     selected_features: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
@@ -87,12 +102,47 @@ impl Resolution {
     pub fn union_packages(&self) -> &[LockedPackage] {
         &self.union
     }
+    pub fn root_records(&self) -> &[source::graph::Root] {
+        &self.roots
+    }
+    pub fn views(&self) -> &[RootView] {
+        &self.views
+    }
     pub fn activate(&mut self, selection: &source::graph::Selection) -> Result<(), Error> {
-        let active = activation::select(&self.root, &self.union, selection)?;
-        self.selection = selection.clone();
-        self.packages = active.packages;
-        self.selected_edges = active.roots;
-        self.selected_features = active.features;
+        let path = self._guard.root().join(&self.root.manifest);
+        self.activate_root(&path, selection)
+    }
+    pub fn activate_root(
+        &mut self,
+        manifest: &std::path::Path,
+        selection: &source::graph::Selection,
+    ) -> Result<(), Error> {
+        let key = manifest_key(manifest)?;
+        let mut selection = selection.clone();
+        if selection.target.is_none() {
+            selection.target = Some(source::graph::Context::host());
+        }
+        let mut requests = self.requests.clone();
+        if !requests
+            .iter()
+            .any(|r| r.manifest == key && r.selection.target == selection.target)
+        {
+            requests.push(ActivationRequest {
+                manifest: key.clone(),
+                selection: selection.clone(),
+            });
+        }
+        let views = activation::select(&self.roots, &self.union, &requests)?;
+        let view = views
+            .iter()
+            .find(|v| v.root.manifest == key && v.selection.target == selection.target)
+            .ok_or_else(|| Error::internal("missing selected root activation"))?;
+        self.root = view.root.clone();
+        self.selection = view.selection.clone();
+        self.packages = view.packages.clone();
+        self.selected_edges = view.dependencies.clone();
+        self.selected_features = view.features.clone();
+        self.views = views;
         Ok(())
     }
 
@@ -124,6 +174,68 @@ impl Resolution {
     }
 }
 
+pub fn manifest_key(path: &std::path::Path) -> Result<String, Error> {
+    let root = paths::env_root()?;
+    let path = root.join(path);
+    paths::portable_path(&paths::relative_to_root(&path, &root))
+}
+fn aggregate(
+    views: &[RootView],
+) -> (
+    Vec<LockedPackage>,
+    Vec<String>,
+    std::collections::BTreeMap<String, BTreeSet<String>>,
+) {
+    let mut packages: std::collections::BTreeMap<String, LockedPackage> = Default::default();
+    let mut edges = BTreeSet::new();
+    let mut features: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for view in views {
+        edges.extend(view.dependencies.iter().cloned());
+        for (id, values) in &view.features {
+            features
+                .entry(id.clone())
+                .or_default()
+                .extend(values.iter().cloned());
+        }
+        for package in &view.packages {
+            if let Some(existing) = packages.get_mut(&package.name) {
+                existing
+                    .dependencies
+                    .extend(package.dependencies.iter().cloned());
+                existing.dependencies.sort();
+                existing.dependencies.dedup();
+            } else {
+                packages.insert(package.name.clone(), package.clone());
+            }
+        }
+    }
+    (
+        packages.into_values().collect(),
+        edges.into_iter().collect(),
+        features,
+    )
+}
+fn reachable(
+    roots: &[source::graph::Root],
+    selected: &BTreeSet<String>,
+    packages: &[LockedPackage],
+) -> BTreeSet<String> {
+    let packages: std::collections::BTreeMap<_, _> =
+        packages.iter().map(|p| (&p.name, p)).collect();
+    let mut pending: Vec<_> = roots
+        .iter()
+        .filter(|r| selected.contains(&r.manifest))
+        .flat_map(|r| r.edges.iter().map(|e| e.key.clone()))
+        .collect();
+    let mut seen = BTreeSet::new();
+    while let Some(key) = pending.pop() {
+        if seen.insert(key.clone()) {
+            pending.extend(packages[&key].dependencies.iter().cloned());
+        }
+    }
+    seen
+}
+
 pub fn resolve<F>(
     manifest: &Manifest,
     options: ResolveOptions,
@@ -147,17 +259,19 @@ where
     F: FnMut(&str, String),
     V: FnMut(&Manifest) -> Result<(), Error>,
 {
-    source::graph::expand(
-        &manifest.features,
-        &manifest
-            .dependencies
-            .iter()
-            .map(|d| d.edge(d.name.clone()))
-            .collect::<Vec<_>>(),
-        &options.selection.features,
-        !options.selection.no_default_features,
-    )
-    .map_err(Error::resolution)?;
+    if manifest.scope.is_none() {
+        source::graph::expand(
+            &manifest.features,
+            &manifest
+                .dependencies
+                .iter()
+                .map(|d| d.edge(d.name.clone()))
+                .collect::<Vec<_>>(),
+            &options.selection.features,
+            !options.selection.no_default_features,
+        )
+        .map_err(Error::resolution)?;
+    }
     if !manifest.dependencies.is_empty() {
         status(
             "Resolving",
@@ -215,6 +329,9 @@ pub fn inspect_selected(
     mut status: impl FnMut(&str, String),
 ) -> Result<Resolution, Error> {
     let options = ResolveOptions {
+        requests: Vec::new(),
+        update_bindings: None,
+        force_bindings: false,
         selection,
         additional_contexts: Vec::new(),
         dry_run: true,
@@ -271,7 +388,7 @@ fn report_policy(options: &ResolveOptions, status: &mut impl FnMut(&str, String)
 
 fn resolve_guarded<F: FnMut(&str, String)>(
     manifest: &Manifest,
-    options: ResolveOptions,
+    mut options: ResolveOptions,
     mut status: F,
     guard: state::Guard,
     validate: &mut dyn FnMut(&Manifest) -> Result<(), Error>,
@@ -324,16 +441,101 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     let dry_run = options.dry_run;
     paths::validate_managed_root(&root, &dep_root)?;
 
-    if let UpdatePolicy::UpdateSelected(selected) = &options.update {
+    let mut root_manifests = if let Some(scope) = &manifest.scope {
+        manifest::workspace::load_context(scope)?
+    } else {
+        vec![manifest.clone()]
+    };
+    options.force_bindings = manifest.scope.is_some();
+    let selected_paths: BTreeSet<_> = if let Some(scope) = &manifest.scope {
+        scope
+            .selected
+            .iter()
+            .map(|p| manifest_key(p))
+            .collect::<Result<_, _>>()?
+    } else {
+        BTreeSet::from([manifest_key(&manifest.source_path)?])
+    };
+    // Resolve selected roots first: an update of a shared binding is then seen
+    // by other roots, while unrelated pinned bindings remain unchanged.
+    let root_keys = root_manifests
+        .iter()
+        .map(|m| Ok((m.source_path.clone(), manifest_key(&m.source_path)?)))
+        .collect::<Result<std::collections::BTreeMap<_, _>, Error>>()?;
+    root_manifests.sort_by_key(|m| {
+        (
+            !selected_paths.contains(&root_keys[&m.source_path]),
+            m.name.clone(),
+        )
+    });
+    let mut requests = options.requests.clone();
+    if requests.is_empty() {
+        for member in root_manifests
+            .iter()
+            .filter(|m| selected_paths.contains(&manifest_key(&m.source_path).unwrap()))
+        {
+            let mut selection = options.selection.clone();
+            if selection.target.is_none() {
+                selection.target = Some(match &member.build_target {
+                    Some(t) => source::graph::Context::new(t).map_err(Error::resolution)?,
+                    None => source::graph::Context::host(),
+                });
+            }
+            requests.push(ActivationRequest {
+                manifest: manifest_key(&member.source_path)?,
+                selection: selection.clone(),
+            });
+            for context in &options.additional_contexts {
+                selection.target = Some(context.clone());
+                requests.push(ActivationRequest {
+                    manifest: manifest_key(&member.source_path)?,
+                    selection: selection.clone(),
+                });
+            }
+        }
+    }
+    let provisional_roots = root_manifests
+        .iter()
+        .map(|m| {
+            Ok(source::graph::Root {
+                manifest: manifest_key(&m.source_path)?,
+                name: m.name.clone(),
+                version: m.version.clone(),
+                edges: m
+                    .dependencies
+                    .iter()
+                    .map(|d| d.edge(d.name.clone()))
+                    .collect(),
+                features: m.features.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let qualified = activation::qualify(&provisional_roots, &requests)?;
+    for request in &qualified {
+        let candidate = root_manifests
+            .iter()
+            .find(|m| manifest_key(&m.source_path).as_deref() == Ok(request.manifest.as_str()))
+            .unwrap();
+        source::graph::expand(
+            &candidate.features,
+            &candidate
+                .dependencies
+                .iter()
+                .map(|d| d.edge(d.name.clone()))
+                .collect::<Vec<_>>(),
+            &request.selection.features,
+            !request.selection.no_default_features,
+        )
+        .map_err(Error::resolution)?;
+        validate(candidate)?;
+    }
+    if let UpdatePolicy::UpdateSelected(wanted) = &options.update {
+        let mut local_options = options.clone();
+        local_options.dry_run = true;
+        local_options.offline = true;
+        local_options.locked = false;
         let mut preflight = graph::Resolver::new(
-            ResolveOptions {
-                selection: options.selection.clone(),
-                additional_contexts: Vec::new(),
-                dry_run: true,
-                update: UpdatePolicy::UpdateSelected(selected.clone()),
-                locked: false,
-                offline: true,
-            },
+            local_options,
             root.clone(),
             dep_root.clone(),
             None,
@@ -342,10 +544,33 @@ fn resolve_guarded<F: FnMut(&str, String)>(
             &existing,
             &mut status,
         );
-        // Local discovery must reuse pinned sources even for selected names.
         preflight.local_preflight();
-        preflight.resolve_manifest_dependencies(manifest).map_err(|e| Error::new(e.category, format!("cannot validate update names from the local current graph: {e}\nhelp: run `vex fetch` first")))?;
-        preflight.validate_selected_packages()?;
+        let mut roots = Vec::new();
+        for member in &root_manifests {
+            preflight.resolve_manifest_dependencies(member).map_err(|e| Error::new(e.category, format!("cannot validate update names from the local current graph: {e}\nhelp: run `vex fetch` first")))?;
+            roots.push(preflight.root_record(member)?);
+        }
+        let (packages, _) = preflight.into_packages();
+        let eligible = reachable(&roots, &selected_paths, &packages);
+        let git: Vec<_> = packages
+            .iter()
+            .filter(|p| eligible.contains(&p.name) && matches!(p.source, LockedSource::Git { .. }))
+            .collect();
+        let available: BTreeSet<_> = git.iter().map(|p| p.import_name()).collect();
+        for name in wanted {
+            if !git
+                .iter()
+                .any(|p| p.import_name() == name || p.name == *name)
+            {
+                return Err(Error::resolution(format!("cannot update package `{name}`: not a Git dependency in the selected current graph\nhelp: available Git packages: {}\nhelp: run `vex update <package>...` using an available dependency alias", available.iter().copied().collect::<Vec<_>>().join(", "))));
+            }
+        }
+        options.update_bindings = Some(
+            git.into_iter()
+                .filter(|p| wanted.contains(p.import_name()) || wanted.contains(&p.name))
+                .map(|p| p.name.clone())
+                .collect(),
+        );
     }
     let transaction = if dry_run {
         None
@@ -356,19 +581,10 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         .as_ref()
         .map(|t| t.stage.clone())
         .unwrap_or(dep_root);
-    let mut selection = options.selection.clone();
-    if selection.target.is_none() {
-        selection.target = Some(match &manifest.build_target {
-            Some(target) => source::graph::Context::new(target).map_err(Error::resolution)?,
-            None => source::graph::Context::host(),
-        });
-    }
-    let additional_contexts = options.additional_contexts.clone();
-    validate(manifest)?;
-    let ((packages, manifests), root_record) = {
+    let ((packages, manifests), roots) = {
         let mut resolver = graph::Resolver::new(
             options,
-            root,
+            root.clone(),
             physical_deps,
             transaction.as_ref(),
             manifest.name.clone(),
@@ -376,18 +592,22 @@ fn resolve_guarded<F: FnMut(&str, String)>(
             &existing,
             &mut status,
         );
-        resolver.resolve_manifest_dependencies(manifest)?;
-        resolver.validate_selected_packages()?;
-        let root_record = resolver.root_record(manifest)?;
-        (resolver.into_packages(), root_record)
+        let mut roots = Vec::new();
+        for member in &root_manifests {
+            resolver.set_updating(selected_paths.contains(&manifest_key(&member.source_path)?));
+            resolver.resolve_manifest_dependencies(member)?;
+            roots.push(resolver.root_record(member)?);
+        }
+        (resolver.into_packages(), roots)
     };
-    let requires_v4 = manifest.format >= 4
+    let requires_v4 = manifest.scope.is_some()
+        || manifest.format >= 4
         || packages
             .iter()
             .any(|p| p.id.is_some() || p.subdir.is_some());
     let resolved = Lockfile {
         roots: if requires_v4 {
-            vec![root_record.clone()]
+            roots.clone()
         } else {
             Vec::new()
         },
@@ -415,22 +635,12 @@ fn resolve_guarded<F: FnMut(&str, String)>(
         }
     }
 
-    let active = activation::select(&root_record, &resolved.packages, &selection)?;
-    let mut validate_keys = active
-        .packages
+    let views = activation::select(&roots, &resolved.packages, &requests)?;
+    let (active_packages, selected_edges, selected_features) = aggregate(&views);
+    let validate_keys = active_packages
         .iter()
         .map(|p| p.name.clone())
         .collect::<BTreeSet<_>>();
-    for context in additional_contexts {
-        let mut selected = selection.clone();
-        selected.target = Some(context);
-        validate_keys.extend(
-            activation::select(&root_record, &resolved.packages, &selected)?
-                .packages
-                .into_iter()
-                .map(|p| p.name),
-        );
-    }
     for key in validate_keys {
         let candidate = &manifests[&key];
         validate(candidate).map_err(|error| {
@@ -496,12 +706,15 @@ fn resolve_guarded<F: FnMut(&str, String)>(
     }
 
     Ok(Resolution {
-        packages: active.packages,
+        packages: active_packages,
         union: resolved.packages,
-        root: root_record,
-        selection,
-        selected_edges: active.roots,
-        selected_features: active.features,
+        root: views[0].root.clone(),
+        selection: views[0].selection.clone(),
+        roots,
+        requests,
+        views,
+        selected_edges,
+        selected_features,
         _guard: guard,
     })
 }

@@ -42,16 +42,16 @@ pub(super) fn dependency_command(
         return Err(Error::usage(format!("`{option}` cannot be used with `vex update` because update refreshes Git refs and rewrites vex.lock")));
     }
     let _project = selection.enter()?;
-    run_fetch(update, options, selection.graph.clone())
+    run_fetch(update, options, selection.graph.clone(), _project.primary())
 }
 
 fn run_fetch(
     update: bool,
     options: DependencyOptions,
     graph: source::graph::Selection,
+    manifest: Manifest,
 ) -> Result<(), Error> {
     let started = Instant::now();
-    let manifest = Manifest::load()?;
     let update_policy = if update {
         if options.packages.is_empty() {
             ui::status("Updating", "all Git dependencies");
@@ -78,6 +78,9 @@ fn run_fetch(
     let resolution = resolve(
         &manifest,
         ResolveOptions {
+            requests: Vec::new(),
+            update_bindings: None,
+            force_bindings: false,
             additional_contexts: Vec::new(),
             selection: graph,
             dry_run: false,

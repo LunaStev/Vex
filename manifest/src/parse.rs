@@ -22,6 +22,7 @@ const ROOT_FIELDS: &[&str] = &[
     "build",
     "target_config",
     "features",
+    "workspace",
 ];
 const DEPENDENCY_FIELDS: &[&str] = &[
     "name",
@@ -79,8 +80,28 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
         }
     }
 
+    let workspace = crate::workspace::parse(data.get("workspace"), format)?;
+    let virtual_workspace = workspace.is_some() && !data.contains_key("name");
+    if virtual_workspace
+        && [
+            "targets",
+            "native",
+            "version",
+            "dependencies",
+            "features",
+            "default_run",
+        ]
+        .iter()
+        .any(|field| data.contains_key(*field))
+    {
+        return Err(
+            "virtual workspaces cannot declare package-only fields; add a name for a root package"
+                .into(),
+        );
+    }
     let name = match data.get("name") {
         Some(WsonValue::String(value)) => restore_url_separators(value),
+        None if virtual_workspace => "workspace".into(),
         _ => return Err("manifest field `name` must be a string".to_string()),
     };
     crate::validate_package_name(&name)?;
@@ -104,7 +125,29 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     let compiler = parse_optional_string(data.get("compiler"), "compiler")?;
     let native = crate::native::parse(data.get("native"), lib)?;
     let model = if format >= 3 {
-        crate::model::parse(&data, &name)?
+        if virtual_workspace {
+            let mut settings = data.clone();
+            settings.insert(
+                "targets".into(),
+                wson::loads_versions(
+                    "{format=4,targets={bins=[{name=\"workspace\",path=\"src/main.wave\"}]}}",
+                    "format",
+                    &[4],
+                )?
+                .remove("targets")
+                .unwrap(),
+            );
+            let mut model = crate::model::parse(&settings, &name)?;
+            if model.target_config.iter().any(|c| !c.bins.is_empty()) {
+                return Err(
+                    "virtual workspace target_config cannot override package binaries".into(),
+                );
+            }
+            model.targets.clear();
+            model
+        } else {
+            crate::model::parse(&data, &name)?
+        }
     } else {
         crate::model::legacy(&name, lib, native.as_ref())
     };
@@ -151,6 +194,10 @@ pub(crate) fn parse_manifest(raw: &str, source_path: PathBuf) -> Result<Manifest
     }
 
     Ok(Manifest {
+        workspace,
+        virtual_workspace,
+        scope: None,
+        fields: data.keys().cloned().collect(),
         format,
         compiler,
         name,

@@ -12,11 +12,25 @@ pub fn info(args: &[String], selection: &crate::project::Selection) -> Result<()
         )));
     }
     let project = selection.enter()?;
-    run_info(&project)
+    if project.workspace {
+        diagnostic::outln!("workspace: {}", project.owner.source_path.display());
+        diagnostic::outln!(
+            "members: {}",
+            project
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    for manifest in &project.selected {
+        run_info(manifest)?;
+    }
+    Ok(())
 }
 
-fn run_info(project: &crate::project::Project) -> Result<(), Error> {
-    let manifest = Manifest::load()?;
+fn run_info(manifest: &Manifest) -> Result<(), Error> {
     diagnostic::outln!("Vex project info");
     diagnostic::outln!("name: {}", manifest.name);
     diagnostic::outln!("version: {}", manifest.version);
@@ -36,7 +50,7 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
     if let Some(default_run) = &manifest.default_run {
         diagnostic::outln!("default_run: {default_run}");
     }
-    diagnostic::outln!("manifest: {}", project.manifest_path.display());
+    diagnostic::outln!("manifest: {}", manifest.source_path.display());
     if let Some(description) = manifest.description.as_ref() {
         diagnostic::outln!("description: {description}");
     }
@@ -48,7 +62,7 @@ fn run_info(project: &crate::project::Project) -> Result<(), Error> {
     }
     diagnostic::outln!("dependencies: {}", manifest.dependencies.len());
 
-    for dep in manifest.dependencies {
+    for dep in manifest.dependencies.clone() {
         let alias = if dep.name != dep.package_name() {
             format!("{} => {}", dep.name, dep.package_name())
         } else {

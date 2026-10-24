@@ -34,9 +34,9 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
     }
     let format_version = format_version.unwrap_or(1);
     let project = selection.enter()?;
-    let root = project.manifest_path.parent().unwrap();
+    let root = project.owner.source_path.parent().unwrap();
     json_path(root)?;
-    let manifest = Manifest::load()?;
+    let manifest = project.primary();
     if format_version == 1 {
         require_single_target(&manifest)?;
     }
@@ -78,6 +78,9 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
             format_version,
         )?;
         value["source"] = source;
+        if format_version >= 2 {
+            value["dependency_declarations"] = json!(package.edges);
+        }
         if package.id.is_some() {
             value["id"] = json!(package.id);
             value["alias"] = json!(package.import_name());
@@ -89,18 +92,77 @@ pub fn metadata(args: &[String], selection: &crate::project::Selection) -> Resul
         packages.push(value);
     }
     packages.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    let mut root_record = package_record(&manifest, root, &project.manifest_path, format_version)?;
-    root_record["dependencies"] = json!(resolution.root_dependencies());
-    let value: Value = json!({"schema_version":format_version,
-        "root":root_record,
-        "selected_features":resolution.selected_features(), "selection":resolution.selection(),
-        "union_bindings":resolution.union_packages().iter().map(|p| json!({"binding":p.name,"alias":p.import_name(),"id":p.id,"name":p.package_name(),"version":p.version,"dependencies":p.dependencies,"edges":p.edges,"features":p.features})).collect::<Vec<_>>(),
+    let root_record = if project.workspace {
+        let default_paths = project
+            .owner
+            .workspace
+            .as_ref()
+            .unwrap()
+            .defaults(&project.owner, &project.members)?;
+        json!({"kind":"workspace", "root":json_path(root)?, "manifest_path":json_path(&project.owner.source_path)?, "package":if project.owner.virtual_workspace { None } else { Some(&project.owner.name) }, "members":project.members.iter().map(|m| &m.name).collect::<Vec<_>>(), "default_members":project.members.iter().filter(|m| default_paths.contains(&m.source_path)).map(|m| &m.name).collect::<Vec<_>>()})
+    } else {
+        let mut value = package_record(&manifest, root, &project.manifest_path, format_version)?;
+        value["dependencies"] = json!(resolution.root_dependencies());
+        if format_version >= 2 {
+            value["dependency_declarations"] = json!(resolution.root_records()[0].edges);
+        }
+        value
+    };
+    let mut members = Vec::new();
+    if project.workspace {
+        for member in &project.members {
+            let directory = member.source_path.parent().unwrap();
+            let mut value = package_record(member, directory, &member.source_path, 2)?;
+            let key = resolver::manifest_key(&member.source_path)?;
+            let selected = project
+                .selected
+                .iter()
+                .any(|m| m.source_path == member.source_path);
+            value["selected"] = json!(selected);
+            value["dependency_declarations"] = json!(
+                resolution
+                    .root_records()
+                    .iter()
+                    .find(|r| r.manifest == key)
+                    .unwrap()
+                    .edges
+            );
+            value["dependencies"] = json!(resolution
+                .views()
+                .iter()
+                .filter(|v| v.root.manifest == key)
+                .flat_map(|v| v.dependencies.iter().cloned())
+                .collect::<std::collections::BTreeSet<_>>());
+            members.push(value);
+        }
+    }
+    let selections = resolution.views().iter().map(|v| json!({"manifest":v.root.manifest,"package":v.root.name,"selection":v.selection,"dependencies":v.dependencies,"features":v.features})).collect::<Vec<_>>();
+    let union = resolution.union_packages().iter().map(|p| Ok(json!({"binding":p.name,"alias":p.import_name(),"id":p.id,"name":p.package_name(),"version":p.version,"dependencies":p.dependencies,"edges":p.edges,"features":p.features,"source":source_record(p),"root":json_path(&root.join(p.directory()))?}))).collect::<Result<Vec<_>, Error>>()?;
+    let value: Value = json!({"schema_version":format_version,"root":root_record,
+        "selected_features":resolution.selected_features(), "selection":if resolution.views().len() == 1 { Some(resolution.selection()) } else { None }, "selections":selections,
+        "workspace_members":members,"union_bindings":union,
         "target_directory":json_path(&root.join("target"))?, "packages":packages});
     diagnostic::outln!(
         "{}",
         serde_json::to_string_pretty(&value).map_err(Error::internal)?
     );
     Ok(())
+}
+
+fn source_record(package: &lockfile::LockedPackage) -> Value {
+    match &package.source {
+        LockedSource::Path { requested, .. } => json!({"kind":"path","requested":requested}),
+        LockedSource::Git {
+            url,
+            branch,
+            tag,
+            rev,
+            commit,
+            ..
+        } => {
+            json!({"kind":"git","url":source::identity(url),"branch":branch,"tag":tag,"rev":rev,"commit":commit,"subdir":package.subdir})
+        }
+    }
 }
 
 fn parse_version(value: Option<&str>, selected: &mut Option<u32>) -> Result<(), Error> {
@@ -116,7 +178,7 @@ fn parse_version(value: Option<&str>, selected: &mut Option<u32>) -> Result<(), 
 }
 
 fn require_single_target(manifest: &Manifest) -> Result<&PackageTarget, Error> {
-    if manifest.targets.len() != 1 || manifest.format >= 4 {
+    if manifest.targets.len() != 1 || manifest.format >= 4 || manifest.scope.is_some() {
         return Err(Error::resolution(format!(
             "metadata schema 1 cannot represent the targets of package `{}`\nhelp: use `vex metadata --format-version 2`",
             manifest.name
@@ -144,13 +206,25 @@ fn package_record(
     if version >= 2 {
         value["features"] = json!(manifest.features);
     }
-    if manifest.format >= 4 {
+    if manifest.format >= 4 || manifest.scope.is_some() {
+        let identity_path = if let Some(scope) = &manifest.scope {
+            root.strip_prefix(scope.owner.parent().unwrap())
+                .map_err(Error::resolution)?
+                .to_path_buf()
+        } else {
+            ".".into()
+        };
+        let identity_path = if identity_path.as_os_str().is_empty() {
+            ".".into()
+        } else {
+            identity_path
+        };
         value["id"] = json!(lockfile::package_identity(
             &manifest.name,
             &manifest.version,
             &LockedSource::Path {
                 requested: ".".into(),
-                resolved: ".".into()
+                resolved: identity_path
             },
             None
         ));

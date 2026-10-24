@@ -172,6 +172,43 @@ def feature_graph_smoke(vex, root, env, host_target):
         raise RuntimeError("target or feature selection rewrote the union lockfile")
 
 
+def workspace_smoke(vex, root, env):
+    workspace = root / "workspace"
+    workspace.mkdir()
+    (workspace / "vex.ws").write_text(
+        '{format=4,compiler="0.2.1-pre-beta",workspace={members=["alpha","beta"],default_members=["beta"]}}', encoding="utf-8")
+    for directory, value in (("one", 11), ("two", 22)):
+        package = workspace / directory
+        (package / "src").mkdir(parents=True)
+        (package / "vex.ws").write_text('{format=4,name="common",version="1.0.0",targets={lib={}}}', encoding="utf-8")
+        (package / "src/lib.wave").write_text(f"pub fun value() -> i32 {{ return {value}; }}\n", encoding="utf-8")
+    for name, source in (("alpha", "one"), ("beta", "two")):
+        package = workspace / name
+        (package / "src").mkdir(parents=True)
+        library = "lib={}," if name == "alpha" else ""
+        (package / "vex.ws").write_text(
+            '{format=4,name="' + name + '",targets={' + library + 'bins=[{name="tool",path="src/main.wave"}]},dependencies=[{name="common",path="../' + source + '"}]}', encoding="utf-8")
+        if name == "alpha":
+            (package / "src/lib.wave").write_text('pub fun own() -> i32 { return 100; }\n', encoding="utf-8")
+        own = 'import("alpha")::{own};\n' if name == "alpha" else ""
+        expression = "own() + value()" if name == "alpha" else "value()"
+        (package / "src/main.wave").write_text(
+            'import("common")::{value};\n' + own + 'fun main() { println("{}", ' + expression + '); }\n', encoding="utf-8")
+    run([vex, "fetch", "--workspace"], workspace, env)
+    locked = (workspace / "vex.lock").read_bytes()
+    run([vex, "build", "--workspace", "--locked", "--offline"], workspace, env)
+    for name, expected in (("alpha", "111"), ("beta", "22")):
+        result = run([vex, "run", "-p", name, "--locked", "--offline"], workspace, env)
+        if result.stdout.strip() != expected:
+            raise RuntimeError("workspace compiler mapping or isolated output failed for " + name)
+    result = run([vex, "metadata", "--format-version", "2", "--workspace", "--locked"], workspace, env)
+    metadata = json.loads(result.stdout)
+    if metadata["root"]["kind"] != "workspace" or len(metadata["workspace_members"]) != 2:
+        raise RuntimeError("workspace metadata did not describe both members")
+    if (workspace / "vex.lock").read_bytes() != locked or any((workspace / name / ".vex").exists() for name in ("alpha", "beta")):
+        raise RuntimeError("workspace command wrote member state or changed its locked graph")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vex", type=Path, required=True)
@@ -225,6 +262,7 @@ def main():
         target_profile_smoke(vex, root, env, host_target)
         package_identity_smoke(vex, root, env)
         feature_graph_smoke(vex, root, env, host_target)
+        workspace_smoke(vex, root, env)
         run([vex, "check", "--target", host_target, "--locked", "--offline"], nested, env)
         rejected = run([vex, "build", "--emit=obj"], app, env, succeeds=False)
         if "unknown Vex option" not in rejected.stderr:

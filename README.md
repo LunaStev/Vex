@@ -594,3 +594,6 @@ CLI help, field types, environment variables, streams, and machine-readable sche
 Vex supports manifest-owned prebuilt native inputs and Wave object/shared outputs.
 See [native interoperability](docs/native-interop.md) for C, C++ and Rust C ABI
 contracts, target-specific paths, artifact ownership and runtime prerequisites.
+
+Format 4 projects can share a lockfile and output directory using explicit
+[workspaces](docs/workspaces.md), selected with `-p <package>` or `--workspace`.

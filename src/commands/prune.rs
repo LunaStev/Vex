@@ -1,5 +1,4 @@
 use diagnostic::Error;
-use manifest::Manifest;
 
 const USAGE: &str = "usage: vex prune [--apply] [--dry-run]";
 
@@ -27,7 +26,7 @@ pub fn prune(args: &[String], selection: &crate::project::Selection) -> Result<(
         }
     }
     let _project = selection.enter()?;
-    let manifest = Manifest::load()?;
+    let manifest = _project.primary();
     let applied = apply && !dry_run;
     let report = resolver::prune(&manifest, applied, crate::ui::status)?;
     for path in &report.removable {

@@ -34,7 +34,11 @@ pub(crate) fn resolve_path(path: &str, manifest_path: &Path) -> PathBuf {
 
 pub(crate) fn relative_to_root(path: &Path, root: &Path) -> PathBuf {
     if let Ok(relative) = path.strip_prefix(root) {
-        return relative.to_path_buf();
+        return if relative.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            relative.to_path_buf()
+        };
     }
 
     let path_components = path.components().collect::<Vec<_>>();

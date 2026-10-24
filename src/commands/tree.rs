@@ -32,14 +32,20 @@ pub fn tree(args: &[String], selection: &crate::project::Selection) -> Result<()
     }
     let options = parse_options(args).map_err(Error::usage)?;
     let _project = selection.enter()?;
-    run_tree(options, selection.graph.clone())
+    run_tree(options, selection.graph.clone(), _project.primary())
 }
 
-fn run_tree(options: TreeOptions, graph: source::graph::Selection) -> Result<(), Error> {
-    let manifest = Manifest::load()?;
+fn run_tree(
+    options: TreeOptions,
+    graph: source::graph::Selection,
+    manifest: Manifest,
+) -> Result<(), Error> {
     let resolution = resolve(
         &manifest,
         ResolveOptions {
+            requests: Vec::new(),
+            update_bindings: None,
+            force_bindings: false,
             additional_contexts: Vec::new(),
             selection: graph,
             dry_run: false,
@@ -49,22 +55,46 @@ fn run_tree(options: TreeOptions, graph: source::graph::Selection) -> Result<(),
         },
         ui::status,
     )?;
-    let invert = options.invert.as_deref().map(|requested| {
-        let matching: Vec<_> = resolution.packages().iter().filter(|p| p.name == requested || p.import_name() == requested || p.id.as_deref() == Some(requested)).collect();
-        match matching.as_slice() { [package] => Ok(package.name.as_str()), [] => Ok(requested), _ => Err(Error::resolution("inverse query matches multiple bindings; select a binding key from metadata schema 2")) }
-    }).transpose()?;
-    diagnostic::out!(
-        "{}",
-        render_tree(
-            &manifest.name,
-            &manifest.version,
-            resolution.root_dependencies(),
-            resolution.packages(),
-            invert,
-            options.depth,
-        )
-        .map_err(Error::resolution)?
-    );
+    let mut found = options.invert.is_none();
+    for view in resolution.views() {
+        let invert = if let Some(requested) = options.invert.as_deref() {
+            let matching: Vec<_> = view
+                .packages
+                .iter()
+                .filter(|p| {
+                    p.name == requested
+                        || p.import_name() == requested
+                        || p.id.as_deref() == Some(requested)
+                })
+                .collect();
+            match matching.as_slice() {
+                [package] => { found = true; Some(package.name.as_str()) },
+                [] if requested == view.root.name => { found = true; Some(requested) },
+                [] => continue,
+                _ => return Err(Error::resolution("inverse query matches multiple bindings; select a binding key from metadata schema 2")),
+            }
+        } else {
+            None
+        };
+        diagnostic::out!(
+            "{}",
+            render_tree(
+                &view.root.name,
+                &view.root.version,
+                &view.dependencies,
+                &view.packages,
+                invert,
+                options.depth
+            )
+            .map_err(Error::resolution)?
+        );
+    }
+    if !found {
+        return Err(Error::resolution(format!(
+            "package `{}` is not present in the selected dependency graph",
+            options.invert.as_deref().unwrap()
+        )));
+    }
     Ok(())
 }
 

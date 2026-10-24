@@ -68,7 +68,7 @@ impl Predicate {
             .all(|(required, found)| required.as_ref().is_none_or(|required| required == found))
     }
 }
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Context {
     pub triple: String,
     pub os: String,
@@ -122,7 +122,7 @@ impl Context {
             .expect("Rust target triple")
     }
 }
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct Selection {
     pub target: Option<Context>,
     pub features: BTreeSet<String>,

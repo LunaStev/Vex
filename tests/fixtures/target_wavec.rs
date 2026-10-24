@@ -39,6 +39,9 @@ fn host() -> &'static str {
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if env::current_exe().unwrap().file_stem().unwrap() != "target-wavec" {
+        if let Some(directory) = env::var_os("TARGET_PROGRAM_EXPECT_CWD") {
+            assert_eq!(env::current_dir().unwrap().canonicalize().unwrap(), PathBuf::from(directory).canonicalize().unwrap());
+        }
         println!("TARGET_PROGRAM:{}", list(&args));
         if let Ok(vex) = env::var("TARGET_PROGRAM_CHECK_LOCK_RELEASE") {
             let status = std::process::Command::new(vex)

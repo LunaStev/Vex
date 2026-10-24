@@ -13,7 +13,7 @@ pub fn clean(args: &[String], selection: &Selection) -> Result<(), Error> {
         _ => return Err(Error::usage(USAGE)),
     };
     let _project = selection.enter()?;
-    manifest::Manifest::load()?;
+    let _manifest = _project.primary();
     let root = std::env::current_dir().map_err(Error::environment)?;
     for name in [".vex", ".vex/init.json", ".vex/transaction.json"] {
         state::reject_link(&root.join(name)).map_err(Error::environment)?;
