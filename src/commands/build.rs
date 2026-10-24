@@ -326,7 +326,7 @@ fn run_build(
     state::artifacts::validate_output_paths(&root, &paths).map_err(Error::compiler)?;
     if options.dry_run {
         ui::verbose("freshness: planning only; compiler will not execute");
-        let plans = prepared.iter().map(|task| json!({"package":task.package,"manifest_path":task.manifest_path,"build_directory":root,"run_directory":if mode == BuildMode::Run { Some(&task.directory) } else { None },"package_target":{"name":task.target.name,"kind":task.target.kind.as_str()},"compiler_plan":task.plan.plan()})).collect::<Vec<_>>();
+        let plans = prepared.iter().map(|task| json!({"package":task.package,"manifest_path":task.manifest_path,"build_directory":root,"run_directory":if matches!(mode, BuildMode::Run|BuildMode::Test) { Some(&task.directory) } else { None },"package_target":{"name":task.target.name,"kind":task.target.kind.as_str()},"compiler_plan":task.plan.plan()})).collect::<Vec<_>>();
         for task in &prepared {
             ui::status(
                 "Planning",
@@ -347,9 +347,35 @@ fn run_build(
             .preflight_ownership()
             .map_err(|e| target_error(e, &task.target, profile_name))?;
     }
-    ui::verbose("freshness: no build cache; compiling the current project");
+    let mut source_roots = members
+        .iter()
+        .map(|m| m.manifest.source_path.parent().unwrap().to_path_buf())
+        .collect::<Vec<_>>();
+    source_roots.push(root.clone());
+    source_roots.extend(resolution.union_packages().iter().map(|p| p.directory()));
+    let freshness = if prepared
+        .iter()
+        .any(|task| task.plan.cache_eligibility().is_ok())
+    {
+        compiler::freshness::Inputs::capture(compiler, source_roots, &json!({"capabilities":spec,"selection":graph_selection,"features":resolution.views().iter().map(|view|&view.features).collect::<Vec<_>>()} ).to_string())
+        .and_then(|inputs| inputs.fingerprint().map(|base| (inputs, base)))
+    } else {
+        Err(prepared
+            .first()
+            .and_then(|task| task.plan.cache_eligibility().err())
+            .unwrap_or_else(|| "no reusable outputs".into()))
+    };
+    match &freshness {Ok(_)=>ui::verbose("freshness: source, dependency, compiler runtime and standard library contents fingerprinted"), Err(reason)=>ui::verbose(format!("freshness: compiling; {reason}"))};
     let mut executions = Vec::new();
-    for task in prepared {
+    for mut task in prepared {
+        if let Ok((inputs, base)) = &freshness {
+            let (plan, status) = task.plan.with_fingerprint(base, inputs);
+            task.plan = plan;
+            match status {
+                Ok(()) => ui::verbose("freshness: verify cached artifacts before reuse"),
+                Err(reason) => ui::verbose(format!("freshness: compiling; {reason}")),
+            };
+        }
         ui::status(
             if mode == BuildMode::Check {
                 "Checking"
@@ -386,7 +412,11 @@ fn run_build(
         };
         let execution = task
             .plan
-            .execute(compiler, if reporting { Some(&mut report) } else { None })
+            .execute_reported(
+                compiler,
+                if reporting { Some(&mut report) } else { None },
+                &mut |message| ui::verbose(message),
+            )
             .map_err(|e| target_error(e, &task.target, profile_name))?
             .map(|execution| execution.in_directory(&task.directory));
         if let Some(execution) = execution {

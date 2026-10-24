@@ -251,6 +251,24 @@
           "type": "boolean"
         }
       }
+    },
+    {
+      "required": [
+        "event",
+        "origin",
+        "reused"
+      ],
+      "properties": {
+        "event": {
+          "const": "freshness"
+        },
+        "origin": {
+          "const": "vex"
+        },
+        "reused": {
+          "type": "boolean"
+        }
+      }
     }
   ]
 }

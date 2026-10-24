@@ -101,6 +101,7 @@ dependencies = [
  "diagnostic",
  "process",
  "serde_json",
+ "sha2",
  "state",
  "toolchain",
 ]

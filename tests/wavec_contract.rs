@@ -278,7 +278,14 @@ fn capability_preflight_rejects_targets_before_state_and_queries_once_per_invoca
         assert_success(&out, command);
     }
     let logged = fs::read_to_string(log).unwrap();
-    assert_eq!(logged.lines().count(), 8);
+    assert_eq!(logged.lines().count(), 9);
+    assert_eq!(
+        logged
+            .lines()
+            .filter(|line| line.starts_with("print std-path"))
+            .count(),
+        1
+    );
     assert_eq!(
         logged
             .lines()

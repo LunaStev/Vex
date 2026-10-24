@@ -91,6 +91,9 @@ fn main() {
     };
     let triple = value("--target").unwrap_or_else(|| host().into());
     if args.first().is_some_and(|arg| arg == "print") {
+        if args.get(1).is_some_and(|arg|arg=="std-path") {
+            if let Ok(path)=env::var("TARGET_STD_PATH") { println!("{}",quote(&path)); return; }
+        }
         if args.get(1).is_some_and(|arg| arg == "supported-targets") {
             println!("[\"x86_64-unknown-linux-gnu\",\"aarch64-unknown-linux-gnu\",\"x86_64-pc-windows-msvc\",\"aarch64-pc-windows-msvc\",\"x86_64-apple-darwin\",\"aarch64-apple-darwin\",\"wasm32-unknown-unknown\",\"wasm32-wasip1\"]");
         } else {
@@ -146,7 +149,7 @@ fn main() {
         let link = if check || object {
             "null".into()
         } else {
-            format!("{{\"output\":{},\"inputs\":[{}],\"program\":\"target fixture linker\",\"args\":[]}}", quote(&output), quote(&intermediate))
+            format!("{{\"output\":{},\"inputs\":[{}],\"program\":{},\"args\":[]}}", quote(&output), quote(&intermediate), quote(&env::var("TARGET_LINK_PROGRAM").unwrap_or_else(|_|"target fixture linker".into())))
         };
         let execute = if run {
             format!("{{\"program\":{},\"args\":[]}}", quote(&output))

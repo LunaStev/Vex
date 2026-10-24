@@ -65,6 +65,7 @@ fn main() {
             println!("{{\"triple\":{target:?},\"os\":{os:?},\"object_format\":{format:?},\"hosted\":true,\"supported\":true}}");
             return;
         }
+        if args.get(1).is_some_and(|s|s=="std-path") { println!("null"); return; }
         assert_eq!(args, ["print", "supported-targets", "--format=json"]);
         println!("{}", env::var("FAKE_TARGETS").unwrap_or_else(|_| "[\"x86_64-unknown-linux-gnu\",\"aarch64-unknown-linux-gnu\"]".into()));
         return;
