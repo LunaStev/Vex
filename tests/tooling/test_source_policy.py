@@ -29,6 +29,20 @@ class SourcePolicyTests(unittest.TestCase):
         self.assertFalse(policy.needs_header(Path('Cargo.lock')))
         policy.check_file(Path('image.png'), b'\r\n\0')
 
+    def test_meson_headers_and_deleted_source_files(self):
+        for name in ['meson.build', 'meson.options']:
+            self.assertTrue(policy.needs_header(Path(name)))
+            with self.assertRaises(ValueError):
+                policy.check_file(Path(name), b"project('fixture')\n")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(['git', 'init', '--quiet', str(root)], check=True)
+            source = root / 'removed.py'
+            source.write_text('old contents')
+            subprocess.run(['git', 'add', 'removed.py'], cwd=root, check=True)
+            source.unlink()
+            policy.validate(root)
+
     def test_dco_contribution_range_and_no_bot_or_merge_exemption(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -44,7 +44,7 @@ class PlatformAcceptanceTests(unittest.TestCase):
             if env is not None:
                 self.assertNotIn('GH_TOKEN', env)
                 self.assertNotIn('GITHUB_TOKEN', env)
-            if len(command) > 1 and command[1] == 'setup':
+            if len(command) > 1 and command[0] != 'meson' and command[1] == 'setup':
                 home = Path(env['VEX_TOOLCHAIN_HOME'])
                 (home/'current').write_text('wavec')
                 (home/'wavec').write_bytes(b'compiler fixture')
@@ -65,18 +65,22 @@ class PlatformAcceptanceTests(unittest.TestCase):
                   patch.object(ci.ci_cross, 'run_target', side_effect=guest_run),
                   patch.object(ci.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(release).encode())) as request):
                 ci.main()
+            setup = next(args for args, _ in native if args[:2] == ('meson', 'setup'))
+            self.assertIn('-Dcargo=cargo', setup)
+            self.assertIn('-Dallow_unverified=false', setup)
             validate.assert_called_once_with(config, target)
             doctest.assert_called_once_with(config)
             self.assertEqual(check_elf.call_count, 3)  # debug Vex, release Vex, public Wave
             self.assertEqual(request.call_args.args[0].get_header('Authorization'), 'Bearer host-api-secret')
-            self.assertIn(('cargo', 'test', '--workspace', '--locked', '--target', target['rust_target']), [args for args, _ in native])
-            self.assertIn(('cargo', 'test', '--workspace', '--locked', '--target', target['rust_target'], '--no-run'), [args for args, _ in native])
-            self.assertTrue(any(args[:3] == (sys.executable, 'x.py', 'build') for args, _ in native))
+            self.assertTrue(any(args[:2] == ('meson', 'test') and '--suite' in args and 'rust' in args for args, _ in native))
+            for phase in ['test-compile', 'build-release']:
+                self.assertTrue(any(args[:2] == ('meson', 'compile') and args[-1] == phase for args, _ in native))
             interop = next(env for args, env in native if len(args) > 1 and args[1] == 'tests/native_interop.py')
             self.assertEqual(Path(interop['CC']), Path('/cross/tools')/'cc')
             self.assertEqual(Path(interop['VEX_TEST_TARGET_RUNNER']), Path('/cross/tools')/'runner')
-            self.assertTrue(any(command[1:3] == ('-m', 'unittest') for command, _ in guest))
-            for script in ['tools/cli_reference.py', 'x.py', 'tests/wave_compatibility.py']:
+            self.assertTrue(any(command[:2] == ('meson', 'test') and 'tooling' in command for command, _ in guest))
+            self.assertTrue(any(command[:2] == ('meson', 'compile') and command[-1] == 'package' for command, _ in guest))
+            for script in ['tools/cli_reference.py', 'tests/wave_compatibility.py']:
                 self.assertTrue(any(len(command) > 1 and command[1] == script for command, _ in guest))
             self.assertFalse(any(command[0] in ['cargo', 'rustc'] for command, _ in guest))
             report = json.loads((root/'dist/acceptance-linux-riscv64.json').read_text())
@@ -88,7 +92,7 @@ class PlatformAcceptanceTests(unittest.TestCase):
             self.assertNotIn('GH_TOKEN', os.environ)
             self.assertNotIn('GITHUB_TOKEN', os.environ)
             calls.append((args, env))
-            if len(args) > 1 and args[1] == 'setup':
+            if len(args) > 1 and args[0] != 'meson' and args[1] == 'setup':
                 self.assertEqual(env['GH_TOKEN'], 'test-api-token')
                 home = Path(env['VEX_TOOLCHAIN_HOME'])
                 (home / 'current').write_text('wavec')

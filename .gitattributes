@@ -2,6 +2,8 @@
 * text=auto eol=lf
 *.rs text eol=lf
 *.py text eol=lf
+meson.build text eol=lf
+meson.options text eol=lf
 *.sh text eol=lf
 *.ps1 text eol=lf
 *.toml text eol=lf

@@ -11,13 +11,14 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 NOTICE = 'This Source Code Form is subject to the terms of the Mozilla Public\nLicense, v. 2.0. If a copy of the MPL was not distributed with this\nfile, You can obtain one at https://mozilla.org/MPL/2.0/.'
 SPDX = 'SPDX-License-Identifier: MPL-2.0'
-SOURCE_SUFFIXES = {'.rs', '.py', '.sh', '.ps1', '.cmd', '.bat', '.toml', '.yml', '.yaml'}
+SOURCE_SUFFIXES = {'.rs', '.py', '.sh', '.ps1', '.cmd', '.bat', '.toml', '.yml', '.yaml', '.build', '.options'}
 BINARY_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf', '.zip', '.gz', '.xz', '.bz2', '.tar', '.7z', '.exe', '.dll', '.so', '.a', '.o', '.lib', '.wasm', '.woff', '.woff2', '.bin'}
 
 
 def paths(root=ROOT):
     raw = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=root)
-    return sorted({Path(name.decode('utf-8')) for name in raw.split(b'\0') if name})
+    deleted = subprocess.check_output(['git', 'ls-files', '--deleted', '-z'], cwd=root).split(b'\0')
+    return sorted({Path(name.decode('utf-8')) for name in raw.split(b'\0') if name and name not in deleted})
 
 
 def needs_header(path):

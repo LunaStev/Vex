@@ -131,7 +131,7 @@ reusing a pruned dependency may require network access through `fetch`.
 Git keeps authentication, SSH, proxy and ordinary configuration while removing
 repository-selection environment overrides. Transport is noninteractive; timeout
 and cancellation terminate supervised child trees. Release infrastructure options
-such as `VEX_RELEASE_HOST` belong to `x.py`, not normal Vex commands.
+such as `VEX_RELEASE_HOST` belong to the Meson release tools, not normal Vex commands.
 
 ## Streams and outcomes
 

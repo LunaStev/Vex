@@ -31,8 +31,9 @@ def validate(root=ROOT):
                 raise ValueError(f'{name}: missing/duplicate platform {row["id"]}')
         if 'continue-on-error: true' in text:
             raise ValueError(f'{name}: platform failures may not be ignored')
-        if "python3 tools/ci_cross.py '${{ matrix.id }}'" not in text:
-            raise ValueError(f'{name}: QEMU acceptance must use the amd64 cross-build pipeline')
+        if ("meson compile -C build acceptance" not in text
+                or "-Dacceptance_platform=${{ matrix.id }}" not in text):
+            raise ValueError(f'{name}: platform acceptance must use the Meson entry point')
         build = re.search(r'(?ms)^  (?:platform|build):\n(.*?)(?=^  [a-z][\w-]*:\n|\Z)', text)
         if not build or 'persist-credentials: false' not in build.group(1):
             raise ValueError(f'{name}: checkout credentials may not enter build/runtime containers')

@@ -58,24 +58,32 @@ def main():
         return run(*command, env=env)
 
     python = 'python3' if cross else sys.executable
-    execute(python, '-m', 'unittest', 'discover', '-s', 'tests/xpy', '-v')
+    build_dir = ROOT / 'build' / ('acceptance-' + target['id'])
+    guest_dir = ROOT / 'build' / ('acceptance-' + target['id'] + '-guest') if cross else build_dir
+    # Reused local configurations must not weaken acceptance with a development
+    # Cargo substitute or an unverified-package opt-in.
+    options = ['-Drelease_targets=' + target['rust_target'],
+               '-Dcargo=cargo', '-Dallow_unverified=false', '-Dacceptance_platform=']
+    run('meson', 'setup', '--reconfigure', build_dir, ROOT, *options,
+        '-Dtest_target=' + (target['rust_target'] if cross else ''))
+    if cross:
+        execute('meson', 'setup', '--reconfigure', guest_dir, ROOT, *options)
+    execute('meson', 'test', '-C', guest_dir, '--no-rebuild', '--suite', 'tooling', '--print-errorlogs', '--verbose')
     if cross:
         ci_cross.verify_doctest_runner(cross)
-    test_args = ['--target', target['rust_target']] if cross else []
     debug = ROOT/'target'/target['rust_target']/'debug/vex' if cross else ROOT/'target/debug'/('vex.exe' if target['os'] == 'windows' else 'vex')
     if cross:
-        run('cargo', 'test', '--workspace', '--locked', *test_args, '--no-run')
+        run('meson', 'compile', '-C', build_dir, 'test-compile')
         ci_cross.check_elf(debug, ci_cross.TARGETS[target['id']][1])
-    run('cargo', 'test', '--workspace', '--locked', *test_args)
+    run('meson', 'test', '-C', build_dir, '--no-rebuild', '--suite', 'rust', '--print-errorlogs', '--verbose')
     execute(python, 'tools/cli_reference.py', '--vex', debug)
-    run(sys.executable, 'x.py', 'build', target['rust_target'])
+    run('meson', 'compile', '-C', build_dir, 'build-release')
     binary = ROOT / 'target' / target['rust_target'] / 'release' / ('vex.exe' if target['os'] == 'windows' else 'vex')
     if cross:
         ci_cross.check_elf(binary, ci_cross.TARGETS[target['id']][1])
-    # Packaging verifies execution in the target userspace without installing a
-    # target Rust compiler. The report records the separate amd64 build host.
+    # Packaging runs inside the target userspace; the Rust compiler stays on amd64.
     package_env = dict(os.environ, VEX_RELEASE_HOST=target['rust_target']) if cross else None
-    execute(python, 'x.py', 'package', target['rust_target'], env=package_env)
+    execute('meson', 'compile', '-C', guest_dir, 'package', env=package_env)
     # Authentication changes API rate limits, never public-release acceptance.
     url = f'https://api.github.com/repos/wavefnd/Wave/releases/tags/v{WAVE_VERSION}'
     headers = {'User-Agent': 'Vex-release-acceptance'}
