@@ -13,10 +13,12 @@ case "$(uname -s)" in
     ;;
   FreeBSD)
     vex_guest_python=python3.11
-    pkg install -y ca_root_nss curl git python311 py311-pip ninja gmake pkgconf gh
+    pkg install -y ca_root_nss curl git python311 ninja gmake pkgconf gh
     ;;
   *) echo 'unsupported guest OS' >&2; exit 1;;
 esac
+# python311 ships ensurepip and its bundled wheels; venv bootstraps pip
+# without requiring a separately packaged Python-flavor pip.
 "$vex_guest_python" -m venv /tmp/vex-meson
 /tmp/vex-meson/bin/python -m pip install -r tools/requirements-build.txt
 export PATH="/tmp/vex-meson/bin:$PATH"

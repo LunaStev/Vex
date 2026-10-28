@@ -125,15 +125,47 @@ pub fn package_identity(
         }
         LockedSource::Git { url, commit, .. } => format!("git:{}@{commit}", source::identity(url)),
     };
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{name:?}|{version:?}|{identity:?}|{subdir:?}").as_bytes())
-    )
+    hex_digest(Sha256::digest(
+        format!("{name:?}|{version:?}|{identity:?}|{subdir:?}").as_bytes(),
+    ))
+}
+
+// Keep persisted IDs/checksums as zero-padded lowercase SHA-256 hex. The
+// digest output type no longer implements LowerHex in sha2 0.11.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .as_ref()
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[(byte >> 4) as usize]),
+                char::from(DIGITS[(byte & 15) as usize]),
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_identity_preserves_legacy_sha256_hex() {
+        // A pre-upgrade identity with leading zeros must remain byte-identical.
+        let source = LockedSource::Git {
+            url: "https://example.com/dep.git".to_string(),
+            branch: None,
+            tag: None,
+            rev: None,
+            commit: "a".repeat(40),
+            resolved: PathBuf::from("unused"),
+        };
+        assert_eq!(
+            package_identity("dep211", "1.2.3", &source, None),
+            "008cd81a9108de700a972998edf1a0fc6db4072fb68a1234a0f6986638738dd6"
+        );
+    }
 
     #[test]
     fn writing_a_legacy_lock_uses_an_escape_aware_format() {

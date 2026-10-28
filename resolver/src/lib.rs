@@ -786,3 +786,18 @@ pub fn edit_manifest(
 pub fn project_git_command() -> std::process::Command {
     git::command()
 }
+// Keep persisted IDs/checksums as zero-padded lowercase SHA-256 hex. The
+// digest output type no longer implements LowerHex in sha2 0.11.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .as_ref()
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[(byte >> 4) as usize]),
+                char::from(DIGITS[(byte & 15) as usize]),
+            ]
+        })
+        .collect()
+}

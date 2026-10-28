@@ -8,7 +8,10 @@ use std::borrow::Cow;
 /// device names. The full SHA-256 also bounds directory component length.
 pub(crate) fn checkout_name(package: &str) -> String {
     use sha2::{Digest, Sha256};
-    format!("pkg_{:x}", Sha256::digest(package.as_bytes()))
+    format!(
+        "pkg_{}",
+        crate::hex_digest(Sha256::digest(package.as_bytes()))
+    )
 }
 
 #[cfg(all(test, unix))]

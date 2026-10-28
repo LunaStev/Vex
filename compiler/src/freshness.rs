@@ -191,7 +191,7 @@ impl Inputs {
         for input in &self.files {
             file(&mut hash, input)?;
         }
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(hex_digest(hash.finalize()))
     }
 }
 
@@ -332,7 +332,7 @@ pub(crate) fn key(
             bytes(&mut hash, normalize(arg).as_bytes());
         }
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex_digest(hash.finalize()))
 }
 fn content_digest(path: &Path) -> Result<String, String> {
     state::reject_link(path)?;
@@ -340,7 +340,7 @@ fn content_digest(path: &Path) -> Result<String, String> {
         return Err("cached output is not a regular file".into());
     }
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex_digest(Sha256::digest(bytes)))
 }
 fn directory(root: &Path, key: &str) -> PathBuf {
     root.join("target/.vex-cache").join(key)
@@ -464,4 +464,19 @@ pub(crate) fn store(
     )?;
     batch.verify_outputs()?;
     batch.finish()
+}
+// Keep persisted IDs/checksums as zero-padded lowercase SHA-256 hex. The
+// digest output type no longer implements LowerHex in sha2 0.11.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .as_ref()
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[(byte >> 4) as usize]),
+                char::from(DIGITS[(byte & 15) as usize]),
+            ]
+        })
+        .collect()
 }

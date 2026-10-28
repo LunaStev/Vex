@@ -582,7 +582,7 @@ fn verify_checksum(path: &Path, expected: &str) -> Result<(), String> {
         }
         hasher.update(&buffer[..size]);
     }
-    if format!("{:x}", hasher.finalize()) != expected {
+    if hex_digest(hasher.finalize()) != expected {
         return Err(error(
             "archive SHA-256 mismatch; existing installation preserved",
         ));
@@ -725,6 +725,22 @@ fn sync_tree(root: &Path) -> Result<(), String> {
         }
     }
     state::sync_dir(root).map_err(error)
+}
+
+// Keep persisted IDs/checksums as zero-padded lowercase SHA-256 hex. The
+// digest output type no longer implements LowerHex in sha2 0.11.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .as_ref()
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[(byte >> 4) as usize]),
+                char::from(DIGITS[(byte & 15) as usize]),
+            ]
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -925,7 +941,7 @@ mod tests {
                 let name = format!("{package}.{extension}");
                 let archive = stage.join("archive");
                 fake_archive(&archive, &package, zip, failure != "payload");
-                let digest = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+                let digest = hex_digest(Sha256::digest(fs::read(&archive).unwrap()));
                 let result = (|| -> Result<PathBuf, String> {
                     let release = fake_release(if failure == "missing" {
                         "wrong-asset"

@@ -40,7 +40,7 @@ impl Cache {
     fn open(url: &str) -> Result<Self, Error> {
         // Credential contexts may expose different repositories at the same URL.
         // Hash the declaration, never persist or display its authentication.
-        let key = format!("{:x}", Sha256::digest(url.as_bytes()));
+        let key = crate::hex_digest(Sha256::digest(url.as_bytes()));
         let root = home()?.join("git");
         fs::create_dir_all(&root).map_err(Error::environment)?;
         state::reject_link(&root).map_err(Error::environment)?;

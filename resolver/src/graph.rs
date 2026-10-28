@@ -181,8 +181,8 @@ impl<'a> Resolver<'a> {
             } => format!("git:{:?}|{branch:?}|{tag:?}|{rev:?}", source::identity(url)),
         };
         Ok(format!(
-            "binding_{:x}",
-            Sha256::digest(
+            "binding_{}",
+            crate::hex_digest(Sha256::digest(
                 format!(
                     "{:?}|{:?}|{source}|{:?}",
                     dependency.name,
@@ -190,7 +190,7 @@ impl<'a> Resolver<'a> {
                     dependency.subdir
                 )
                 .as_bytes()
-            )
+            ))
         ))
     }
     fn edges_for(&self, manifest: &Manifest) -> Result<Vec<source::graph::Edge>, Error> {

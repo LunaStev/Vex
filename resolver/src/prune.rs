@@ -361,7 +361,7 @@ fn snapshot_directory(
             }
             files.insert(
                 name,
-                json!({"kind":"file", "mode":mode, "sha256":format!("{:x}", digest.finalize())}),
+                json!({"kind":"file", "mode":mode, "sha256":crate::hex_digest(digest.finalize())}),
             );
         } else {
             return Err("checkout contains an unsupported filesystem entry".into());

@@ -453,7 +453,7 @@ fn sync_file(path: &Path) -> Result<(), String> {
 
 fn fingerprint(value: &str) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    crate::hex_digest(Sha256::digest(value.as_bytes()))
 }
 
 #[cfg(test)]
