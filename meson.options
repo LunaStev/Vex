@@ -1,0 +1,34 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+# SPDX-License-Identifier: MPL-2.0
+option(
+    'release_targets',
+    type: 'array',
+    value: [],
+    description: 'Release triples; empty selects the rustc host',
+)
+option(
+    'allow_unverified',
+    type: 'boolean',
+    value: false,
+    description: 'Development package only: allow a missing execution verifier',
+)
+option(
+    'cargo',
+    type: 'array',
+    value: ['cargo'],
+    description: 'Cargo executable and optional leading arguments; never interpreted by a shell',
+)
+option(
+    'test_target',
+    type: 'string',
+    value: '',
+    description: 'Cargo test triple, for host-compiled QEMU acceptance',
+)
+option(
+    'acceptance_platform',
+    type: 'string',
+    value: '',
+    description: 'Platform ID from platforms.json for full compiler/ABI acceptance',
+)

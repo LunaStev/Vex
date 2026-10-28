@@ -116,11 +116,11 @@ it is diagnostic output, not a stable Vex metadata interface.
 ## Release and merge policy
 
 Rust 1.96.0 is the initial supported toolchain/MSRV, including rustfmt and Clippy.
-The checked-in toolchain, Cargo declarations and CI/release setup agree. x.py
+The checked-in toolchain, Cargo declarations and CI/release setup agree. Meson automation
 selects that toolchain even when the caller's rustup default differs.
 
 Release versions permit normal versions and prereleases, without `+build.metadata`.
-The workflow and x.py call the same validation policy. No official release is
+The workflow and Meson artifact tools call the same validation policy. No official release is
 created by local build/package verification.
 
 Archives include the license texts and notices from the complete locked Cargo
@@ -204,3 +204,29 @@ verified compiler installation, and this real Wave smoke. RISC-V and LoongArch
 execute target userspace through QEMU; FreeBSD uses a VM. Cross compilation alone
 cannot produce acceptance. The public artifact checks and eventual release run
 must pass before release; local candidate results do not satisfy those gates.
+
+The QEMU lanes compile Rust tests (including doctests), Vex release binaries and
+all compiler fixtures on Linux amd64 with Rust 1.96.0 and the digest-pinned Debian
+cross SDK in `tools/ci_cross.Dockerfile`. Cargo's target runner executes tests in
+the pinned target container, where Git, Wave and user programs also execute.
+C/C++/Rust interoperability inputs and consumers are cross-compiled on amd64;
+their Wave interactions and resulting executables run in that same QEMU guest.
+Fixture source/binary hashes and ELF architectures are checked before execution.
+Reports distinguish the build host, target runtime and SDK package versions.
+Cross test builds use optimization level 1 with debug assertions and integer
+overflow checks explicitly enabled; the complete suite still executes. Native
+platform lanes retain their normal unoptimized test profile.
+On an amd64 Linux host with Docker, registered target binfmt handlers and the
+matching Rust target installed, reproduce either lane with
+Meson after installing `tools/requirements-build.txt` and Ninja:
+
+```sh
+meson setup build/riscv64 -Drelease_targets=riscv64gc-unknown-linux-gnu -Dacceptance_platform=linux-riscv64
+meson compile -C build/riscv64 acceptance
+meson setup build/loongarch64 -Drelease_targets=loongarch64-unknown-linux-gnu -Dacceptance_platform=linux-loongarch64
+meson compile -C build/loongarch64 acceptance
+```
+
+Meson owns automation sequencing; Cargo still owns compilation. Target guests
+run the same pinned Meson version and Python tooling suite. Cross host and guest
+configurations use separate build directories; the guest needs no Rust compiler.

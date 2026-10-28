@@ -27,8 +27,10 @@ M: LunaStev <luna@lunastev.org>
 F: .github/
 F: Cargo.toml
 F: Cargo.lock
-F: x.py
-F: tests/xpy/
+F: meson.build
+F: meson.options
+F: tools/
+F: tests/tooling/
 F: RELEASING.md
 
 [Documentation and Community]

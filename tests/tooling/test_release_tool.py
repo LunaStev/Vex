@@ -28,9 +28,9 @@ with (ROOT / "Cargo.toml").open("rb") as manifest_file:
     root_manifest = tomllib.load(manifest_file)
     EXPECTED_VERSION = root_manifest["workspace"]["package"]["version"]
 MODULE_NAME = "vex_release_tool"
-SPEC = importlib.util.spec_from_file_location(MODULE_NAME, ROOT / "x.py")
+SPEC = importlib.util.spec_from_file_location(MODULE_NAME, ROOT / "tools/release_artifacts.py")
 if SPEC is None or SPEC.loader is None:  # pragma: no cover - import setup failure
-    raise RuntimeError("could not load x.py")
+    raise RuntimeError("could not load release_artifacts.py")
 release_tool = importlib.util.module_from_spec(SPEC)
 sys.modules[MODULE_NAME] = release_tool
 SPEC.loader.exec_module(release_tool)
@@ -295,7 +295,7 @@ class ReleaseToolTests(unittest.TestCase):
         for target in release_tool.SUPPORTED_TARGETS:
             self.assertIn(f"target: {target}", workflow)
             self.assertGreaterEqual(workflow.count(target), 2)
-        self.assertIn("python x.py checksum", workflow)
+        self.assertIn("meson compile -C build checksum", workflow)
         self.assertIn("--draft", workflow)
         self.assertIn("--generate-notes", workflow)
         self.assertIn('--target "$RELEASE_COMMIT"', workflow)
@@ -394,10 +394,8 @@ class ReleaseToolTests(unittest.TestCase):
                 self.assertEqual(report["archive"], archive.name)
 
     def test_official_release_does_not_accept_unverified_opt_in(self) -> None:
-        parser = release_tool.create_parser("0.0.1")
-        self.assertTrue(parser.parse_args(["package", "--allow-unverified"]).allow_unverified)
         with self.assertRaises(SystemExit) as result:
-            parser.parse_args(["release", "--allow-unverified"])
+            release_tool.main(["verify-source", "--allow-unverified"])
         self.assertEqual(result.exception.code, 2)
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertNotIn("--allow-unverified", workflow)
@@ -486,29 +484,28 @@ class ReleaseToolTests(unittest.TestCase):
 
 
 class ReleaseToolCliTests(unittest.TestCase):
-    def run_xpy(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_config(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(ROOT / "x.py"), *arguments],
-            cwd=ROOT,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            [sys.executable, str(ROOT / "tools/build_config.py"), *arguments],
+            cwd=ROOT, check=False, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
     def test_version_output_uses_manifest_version(self) -> None:
-        result = self.run_xpy("--version")
+        result = self.run_config("version")
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), f"x.py {EXPECTED_VERSION}")
+        self.assertEqual(result.stdout.strip(), EXPECTED_VERSION)
 
     def test_list_targets_reports_all_supported_targets(self) -> None:
-        result = self.run_xpy("list-targets")
+        result = self.run_config("targets")
         self.assertEqual(result.returncode, 0)
-        for target in release_tool.SUPPORTED_TARGETS:
-            self.assertIn(target, result.stdout)
+        self.assertEqual(set(result.stdout.splitlines()), set(release_tool.SUPPORTED_TARGETS))
 
     def test_unknown_target_is_actionable(self) -> None:
-        result = self.run_xpy("build", "imaginary-target")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools/release_artifacts.py"), "package", "imaginary-target"],
+            cwd=ROOT, text=True, capture_output=True,
+        )
         self.assertEqual(result.returncode, 1)
         self.assertIn("error: unsupported target: imaginary-target", result.stderr)
         self.assertIn("Known targets:", result.stderr)

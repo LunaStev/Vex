@@ -27,13 +27,13 @@ boundaries or a persistent file format.
 You need:
 
 - Rust 1.96.0 with its `rustfmt` and `clippy` components
-- Python 3.11 or newer for `x.py` release tooling
+- Python 3.11 or newer, Meson 1.8.5+ and Ninja for repository automation
 - Git for dependency integration tests
 - a compatible `wavec` in `PATH` for end-to-end build and run tests
 
 `rust-toolchain.toml`, workspace `rust-version`, CI, and release builds select
 1.96.0. This is the first supported toolchain and MSRV; changing it requires a
-reviewed change to all four and native platform validation. `x.py` also selects
+reviewed change to all four and native platform validation. Meson automation also selects
 the pinned toolchain when a caller has set a different `RUSTUP_TOOLCHAIN`.
 
 Set `VEX_WAVEC=/path/to/wavec` when testing a specific compiler binary.
@@ -47,10 +47,12 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 cargo build --workspace --locked
 ```
 
-The same baseline is available through the repository release tool:
+The same baseline is available through Meson (including the Python tooling tests):
 
 ```sh
-python3 x.py check
+python3 -m pip install -r tools/requirements-build.txt ninja==1.13.0
+meson setup build
+meson compile -C build check
 ```
 
 ## Making a change
@@ -74,7 +76,7 @@ Add tests at the same level as the behavior being changed:
 - parser and policy details belong in unit tests
 - dependency graph and Git behavior belong in integration tests
 - compiler invocation changes require dry-run schema and end-to-end smoke tests
-- release-tool changes require `python3 -m unittest discover -s tests/xpy -v`
+- release-tool changes require `python3 -m unittest discover -s tests/tooling -v`
 - package changes require archive-content, checksum, and executable smoke tests
 - platform changes must preserve native integration coverage where a hosted
   runner exists; cross-build-only targets must be documented as experimental
@@ -106,9 +108,9 @@ The official Wave v0.2.0-pre-beta archive lacks the canonical package import
 contract used by current Vex; do not treat its Hello World success as full
 package compatibility.
 
-Release packages are created with `python3 x.py build` followed by
-`python3 x.py package`. Do not hand-edit `dist/` artifacts. The stricter
-`python3 x.py release` command is reserved for a clean commit carrying the exact
+Release packages are created with `meson compile -C build build-release` followed by
+`meson compile -C build package`. Do not hand-edit `dist/` artifacts. The stricter
+`meson compile -C build release` command is reserved for a clean commit carrying the exact
 annotated `v<version>` tag. Maintainers must follow [RELEASING.md](RELEASING.md)
 for multi-platform artifact aggregation and publication.
 
@@ -191,3 +193,27 @@ references and missing platform lanes. No dependency-update bot is enabled.
 CI uses PR runs for feature branches and push runs for master. Superseded runs
 with the same PR/branch identity are cancelled; release runs use their separate,
 non-cancelling concurrency group.
+
+## Source licensing and line endings
+
+Own Rust source (including executable test fixtures), Python/shell/PowerShell and
+Windows command scripts, TOML and YAML configuration carry the full MPL 2.0 source
+notice plus `SPDX-License-Identifier: MPL-2.0` near the start, after any shebang.
+Copyright attribution remains centralized in the existing project files.
+Third-party/vendor files keep their original ownership. Generated Cargo locks,
+CLI manuals/completions and notices are not relabeled. JSON and exact WSON/lock/
+Wave syntax fixtures are exempt where comments would change meaning or diagnostics.
+
+Text defaults to LF through `.gitattributes`; cmd/bat scripts use CRLF. Declared
+binary formats are not normalized. This policy's normalization is grouped in the
+repository-policy commit. `python3 tools/source_policy.py` checks both source
+headers and worktree line endings without fixing files implicitly.
+
+The existing read-only Quality CI checks every contribution commit in the PR's
+exact `base..head` range. Old base history is not checked retroactively. Each
+commit needs a real author-matching `Signed-off-by: Name <email>` trailer; bots
+and ordinary merges are not exempt. Only GitHub-generated merges verified by
+GitHub's API and signature metadata receive the merge exception. Synthetic PR
+merge refs are not used as contribution heads. No DCO application or repository
+write token is used. Repair your own missing certification with
+`git commit --amend -s`, or rebase and sign off the affected contribution commits.

@@ -10,7 +10,7 @@ the dispatcher's explicit choice.
 
 - `Cargo.toml` is the single source of truth for the Vex version.
 - Official versions are normal `x.y.z` or SemVer prereleases. Build metadata
-  (`+...`) is not supported. `tools/release_version.py` is shared by x.py and the
+  (`+...`) is not supported. `tools/release_version.py` is shared by the Meson artifact tools and the
   workflow; leading zero numeric identifiers and empty prerelease parts are errors.
 - Rust 1.96.0 is the pinned release toolchain and initial supported MSRV. Keep
   `rust-toolchain.toml`, all workspace rust-version declarations, and CI/release
@@ -72,7 +72,9 @@ checklist before tagging:
 5. Run the complete local validation suite:
 
    ```sh
-   python3 x.py check
+   python3 -m pip install -r tools/requirements-build.txt ninja==1.13.0
+   meson setup build
+   meson compile -C build check
    ```
 
 6. Run a real product smoke with a compatible `wavec`: initialize a temporary

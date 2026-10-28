@@ -500,29 +500,44 @@ Vex/
 └── wson/         # shared versioned string/parser boundary
 ```
 
-The repository-level `x.py` script is the supported entry point for release
-builds and packages. It reads the version from `Cargo.toml`, always builds with
-the committed `Cargo.lock`, and writes archives plus `SHA256SUMS` to `dist/`.
-Run it with Python 3.11 or newer:
+Meson is the supported repository automation entry point. Cargo continues to
+own Rust dependencies, the committed `Cargo.lock`, compilation and incremental
+build decisions. Python 3.11+, Meson 1.8.5+ and Ninja are required. In a Python
+virtual environment, install the pinned automation version and Ninja:
 
 ```sh
-# Show the host and every supported release target.
-python3 x.py list-targets
+python3 -m pip install -r tools/requirements-build.txt ninja==1.13.0
+meson setup build
 
-# Run formatting, release-tool tests, Rust tests, Clippy, and a debug build.
-python3 x.py check
+# Show every supported release target.
+meson compile -C build list-targets
 
-# Build and package the native target.
-python3 x.py build
-python3 x.py package
+# Formatting, tooling tests, Rust tests, Clippy and a workspace debug build.
+meson compile -C build check
 
-# Build or package one or more explicit targets.
-python3 x.py build x86_64-unknown-linux-gnu
-python3 x.py package x86_64-unknown-linux-gnu
+# Default compilation builds the Cargo workspace in debug mode.
+meson compile -C build
 
-# Verify an assembled target set and regenerate its checksums.
-python3 x.py checksum x86_64-unknown-linux-gnu
+# Run the Python and Rust suites, with Meson test reports.
+meson test -C build --print-errorlogs
+
+# Build and package the native target; archives and SHA256SUMS go to dist/.
+meson compile -C build build-release
+meson compile -C build package
+
+# Select one or more release triples (comma-separated), then build/package.
+meson configure build -Drelease_targets=x86_64-unknown-linux-gnu
+meson compile -C build build-release
+meson compile -C build package
+meson compile -C build checksum
 ```
+
+`package` validates existing binaries; it does not silently build missing ones.
+Every build request reaches Cargo, even with unchanged Meson configuration;
+Cargo decides whether recompilation is necessary. `meson compile -C build
+clean-artifacts` runs Cargo clean and removes `dist/`. Ninja's ordinary `clean`
+only cleans files owned by Meson. Keep separate build directories for different
+release target sets when needed.
 
 Archives contain the Vex executable together with `README.md`, `LICENSE`,
 `NOTICE`, `COPYRIGHT`, and `THIRD_PARTY_LICENSES`. Their file order, permissions, owners, and timestamps
@@ -530,25 +545,27 @@ are normalized. Set
 `SOURCE_DATE_EPOCH` to an explicit non-negative Unix timestamp when reproducing
 an artifact outside the tagged source revision.
 
-`python3 x.py release [<target>...]` is intentionally stricter than separate
-build and package commands. It runs the complete validation suite and succeeds
-only when the working tree is clean and `HEAD` has the exact `v<version>` tag.
+`meson compile -C build release` is intentionally stricter than separate
+build and package commands. It first verifies the release source, then runs the complete validation suite,
+builds and packages the configured targets. It succeeds only when the working tree is clean and `HEAD` has the exact `v<version>` tag.
 Cross-target builds still require the corresponding Rust target and native
 linker to be installed. `VEX_RELEASE_HOST` exists for release infrastructure
 that must override host-target detection; normal development should not set it.
 
 Packaging requires successful version/help execution, natively or through the
 configured QEMU/Wine verifier. A missing verifier fails before replacing an
-existing archive. `x.py package --allow-unverified` permits an unverified
+existing archive. `meson configure build -Dallow_unverified=true` followed by `package` permits an unverified
 development archive only when no verifier is available; it cannot suppress a
-failed smoke test and is not accepted by `x.py release`.
+failed smoke test and causes `release` to fail before validation or builds.
 
 Each packaged archive produces one JSON line on stdout with `schema_version: 1`,
 `archive`, `sha256`, `target`, `version`, `verification` (`verified` or
 `unverified`) and `verifier` (`native`, emulator name, or null). Progress remains
-on stderr. These are packaging reports, separate from Vex command message files.
+on stderr in the artifact helper. Meson/Ninja also print task logs when running
+the automation target. These packaging reports are separate from Vex command
+message files.
 
-`python3 x.py verify-release` checks that the source tree is clean and `HEAD`
+`meson compile -C build verify-release` checks that the source tree is clean and `HEAD`
 has the annotated `v<version>` tag for local release reproduction. For an
 official release, a maintainer dispatches the Release workflow from
 `wavefnd/Vex:master`; the workflow refuses forks and non-`master` refs. It
@@ -594,3 +611,49 @@ CLI help, field types, environment variables, streams, and machine-readable sche
 Vex supports manifest-owned prebuilt native inputs and Wave object/shared outputs.
 See [native interoperability](docs/native-interop.md) for C, C++ and Rust C ABI
 contracts, target-specific paths, artifact ownership and runtime prerequisites.
+
+Format 4 projects can share a lockfile and output directory using explicit
+[workspaces](docs/workspaces.md), selected with `-p <package>` or `--workspace`.
+
+Create a separate format 4 project with `vex new app`; invalid inferred names are
+rejected, so use `vex new my-app --name my_app` explicitly. Git initialization is
+opt-in with `--git`. Existing destinations, including empty directories, remain
+untouched. An interrupted scaffold keeps its recovery journal in the new project.
+
+```sh
+vex add utility --path ../utility --offline
+vex add utility --git https://example.org/utility.git --tag v1.0.0
+vex add short_name --git https://example.org/utility.git --package-name utility --version-req '^1'
+vex remove utility --offline
+```
+
+`add`/`remove` change direct dependencies only and preserve unrelated comments and
+formatting. A durable journal coordinates `vex.ws` and the root `vex.lock`;
+failed resolution restores both. A normal `fetch` recovers interrupted edits,
+while dry-run and metadata report pending recovery without modifying files.
+Use `-p <member>` when editing a workspace. Legacy string meaning is preserved;
+values that cannot be represented safely require explicit manifest migration.
+
+The installed binary includes CLI tooling generators, keeping release archives'
+existing layout: `vex completions bash|zsh|fish|powershell` and `vex manpage` print
+installable scripts and the `vex(1)` manual. No compiler or network is queried.
+The checked-in [command reference](docs/commands.md), `docs/completions/`, and
+`docs/vex.1` are generated from `tools/command-spec.json`; CI verifies drift.
+
+Format 4 supports explicit executable tests, each with a normal Wave `main`:
+
+```wson
+ targets = { lib = {}, tests = [{ name = "smoke", path = "tests/smoke.wave" }] },
+ test_dependencies = [{ name = "fixtures", path = "../fixtures" }]
+```
+
+`vex test [name-substring] [--locked] [--offline] [-- <args...>]` compiles all
+selected tests before running them in package/name order. Every selected test
+runs; the first failed program's exit code is returned unchanged. Test results
+appear as `test_result` events in `--message-file` JSONL; program stdio is inherited.
+No test result is cached. Compilation failures stop the batch. Cross targets
+require a compiler-supported runner and otherwise fail before execution.
+Test dependencies are fetched into the union lock, selected only for a root test
+invocation, and never propagated as a dependency's ordinary imports. Query them
+with `tree` or `metadata --include-tests --format-version 2`.
+Wave's compiler-native unit-test harness remains unsupported until Wave adds it.

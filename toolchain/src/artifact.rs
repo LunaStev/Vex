@@ -1,3 +1,10 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+#[cfg(test)]
+#[path = "../../tests/support/mod.rs"]
+mod test_support;
 use flate2::read::GzDecoder;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -575,7 +582,7 @@ fn verify_checksum(path: &Path, expected: &str) -> Result<(), String> {
         }
         hasher.update(&buffer[..size]);
     }
-    if format!("{:x}", hasher.finalize()) != expected {
+    if hex_digest(hasher.finalize()) != expected {
         return Err(error(
             "archive SHA-256 mismatch; existing installation preserved",
         ));
@@ -720,6 +727,22 @@ fn sync_tree(root: &Path) -> Result<(), String> {
     state::sync_dir(root).map_err(error)
 }
 
+// Keep persisted IDs/checksums as zero-padded lowercase SHA-256 hex. The
+// digest output type no longer implements LowerHex in sha2 0.11.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .as_ref()
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[(byte >> 4) as usize]),
+                char::from(DIGITS[(byte & 15) as usize]),
+            ]
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,31 +779,17 @@ mod tests {
         let source = fixture.0.join("compiler.rs");
         fs::write(
             &source,
-            r#"
-            fn main() {
-                if std::env::current_exe().unwrap().file_stem().unwrap() == "broken" {
-                    eprintln!("missing compiler runtime");
-                    std::process::exit(7);
-                }
-                if std::env::var_os("NO_COLOR").is_some() {
-                    println!("wavec 0.2.1-pre-beta (platform)\n  backend: LLVM 21");
-                } else {
-                    println!("\x1b[32mwavec\x1b[0m \x1b[32m0.2.1-pre-beta\x1b[0m");
-                }
-            }
-        "#,
+            include_str!("../../tests/fixtures/version_probe.rs"),
         )
         .unwrap();
         let binary = fixture
             .0
             .join(if cfg!(windows) { "wavec.exe" } else { "wavec" });
-        assert!(Command::new("rustc")
-            .arg(source)
-            .arg("-o")
-            .arg(&binary)
-            .status()
-            .unwrap()
-            .success());
+        super::test_support::compile_fixture_from(
+            "version_probe",
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/version_probe.rs"),
+            &binary,
+        );
         verify_binary_version(&binary, "0.2.1-pre-beta").unwrap();
         let mismatch = verify_binary_version(&binary, "0.2.0-pre-beta").unwrap_err();
         assert!(mismatch.contains("does not match") && mismatch.contains("0.2.1-pre-beta"));
@@ -932,7 +941,7 @@ mod tests {
                 let name = format!("{package}.{extension}");
                 let archive = stage.join("archive");
                 fake_archive(&archive, &package, zip, failure != "payload");
-                let digest = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+                let digest = hex_digest(Sha256::digest(fs::read(&archive).unwrap()));
                 let result = (|| -> Result<PathBuf, String> {
                     let release = fake_release(if failure == "missing" {
                         "wrong-asset"

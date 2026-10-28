@@ -31,7 +31,8 @@ except ModuleNotFoundError:  # pragma: no cover - handled before any command run
     tomllib = None
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 TARGET_DIR = ROOT / "target"
 DIST_DIR = ROOT / "dist"
 BINARY_NAME = "vex"
@@ -45,7 +46,7 @@ PACKAGE_DOCUMENTS = (
 CHECKSUM_FILE = "SHA256SUMS"
 MINIMUM_ZIP_EPOCH = 315532800  # 1980-01-01T00:00:00Z
 MAXIMUM_ZIP_EPOCH = 4354819198  # 2107-12-31T23:59:58Z
-from tools.release_version import VERSION_PATTERN, valid_version
+from tools.release_version import valid_version
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -174,37 +175,6 @@ def select_targets(names: Sequence[str]) -> list[Target]:
     return selected
 
 
-def build_environment(target: Target) -> dict[str, str]:
-    environment = os.environ.copy()
-    if target.triple == "riscv64gc-unknown-linux-gnu":
-        variable = "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER"
-        if variable not in environment:
-            linker = shutil.which("riscv64-linux-gnu-gcc")
-            if linker is None:
-                raise ReleaseError(
-                    "RISC-V builds require `riscv64-linux-gnu-gcc` in PATH or "
-                    f"an explicit `{variable}`"
-                )
-            environment[variable] = linker
-    return environment
-
-
-def build_targets(targets: Iterable[Target]) -> None:
-    for target in targets:
-        status("Building", target.triple)
-        run_command(
-            [
-                "cargo",
-                "build",
-                "--locked",
-                "--release",
-                "--target",
-                target.triple,
-            ],
-            env=build_environment(target),
-        )
-
-
 def package_name(version: str, target: Target) -> str:
     return f"{BINARY_NAME}-v{version}-{target.triple}"
 
@@ -237,7 +207,7 @@ def prepare_stage(version: str, target: Target, *, root: Path = ROOT) -> Path:
     if not source_binary.is_file():
         raise ReleaseError(
             f"release binary is missing: `{source_binary}`\n"
-            f"help: run `python3 x.py build {target.triple}` first"
+            f"help: run `meson compile -C build build-release` with -Drelease_targets={target.triple} first"
         )
 
     dist_dir = root / "dist"
@@ -545,7 +515,7 @@ def require_clean_tree() -> None:
     if dirty:
         raise ReleaseError(
             "official releases require a clean Git working tree\n"
-            "help: commit, stash, or remove local changes before running `x.py release`"
+            "help: commit, stash, or remove local changes before running `meson compile -C build release`"
         )
 
 
@@ -571,171 +541,31 @@ def verify_release_source(version: str) -> None:
     require_release_tag(version)
 
 
-def run_check_suite() -> None:
-    run_command(["cargo", "fmt", "--check"])
-    run_python_tests()
-    run_command(["cargo", "test", "--workspace", "--locked"])
-    run_command(
-        [
-            "cargo",
-            "clippy",
-            "--workspace",
-            "--locked",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ]
-    )
-    run_command(["cargo", "build", "--workspace", "--locked"])
-
-
-def command_check(_: argparse.Namespace) -> None:
-    run_check_suite()
-
-
-def command_test(_: argparse.Namespace) -> None:
-    run_python_tests()
-    run_command(["cargo", "test", "--workspace", "--locked"])
-
-
-def command_build(args: argparse.Namespace) -> None:
-    build_targets(select_targets(args.targets))
-
-
-def command_package(args: argparse.Namespace) -> None:
-    targets = select_targets(args.targets)
-    package_targets(targets, load_version(), detect_host_target(), allow_unverified=args.allow_unverified)
-
-
-def command_checksum(args: argparse.Namespace) -> None:
-    targets = select_targets(args.targets)
-    checksum_path = write_checksums(
-        collect_release_archives(targets, load_version()),
-    )
-    status("Checksums", str(checksum_path.relative_to(ROOT)))
-
-
-def command_verify_release(_: argparse.Namespace) -> None:
-    version = load_version()
-    verify_release_source(version)
-    status("Verified", f"clean source at annotated tag v{version}")
-
-
-def command_release(args: argparse.Namespace) -> None:
-    version = load_version()
-    verify_release_source(version)
-    targets = select_targets(args.targets)
-    run_check_suite()
-    build_targets(targets)
-    package_targets(targets, version, detect_host_target())
-
-
-def command_clean(_: argparse.Namespace) -> None:
-    status("Cleaning", "Cargo build artifacts")
-    run_command(["cargo", "clean"])
-    if DIST_DIR.exists():
-        status("Cleaning", str(DIST_DIR.relative_to(ROOT)))
-        shutil.rmtree(DIST_DIR)
-
-
-def command_list_targets(_: argparse.Namespace) -> None:
-    try:
-        host = detect_host_target()
-    except ReleaseError:
-        host = "<unknown>"
-    print(f"Host: {host}")
-    print("Supported release targets:")
-    for target in SUPPORTED_TARGETS.values():
-        marker = " (native default)" if target.triple == host else ""
-        print(
-            f"  {target.triple:<36} {target.platform:<8} "
-            f"{target.architecture:<13} {target.archive}{marker}"
-        )
-
-
-def add_target_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "targets",
-        nargs="*",
-        metavar="TARGET",
-        help="release target triple; defaults to the rustc host",
-    )
-
-
-def run_python_tests() -> None:
-    run_command(
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests/xpy", "-v"]
-    )
-
-
-def create_parser(version: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Build and package reproducible Vex release artifacts."
-    )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {version}")
-    commands = parser.add_subparsers(dest="command")
-
-    check = commands.add_parser("check", help="run the complete local validation suite")
-    check.set_defaults(handler=command_check)
-
-    test = commands.add_parser("test", help="run release-tool and Rust tests")
-    test.set_defaults(handler=command_test)
-
-    build = commands.add_parser("build", help="build release binaries")
-    add_target_arguments(build)
-    build.set_defaults(handler=command_build)
-
-    package = commands.add_parser("package", help="package existing release binaries")
-    add_target_arguments(package)
-    package.add_argument(
-        "--allow-unverified", action="store_true",
-        help="development only: permit packaging when no execution verifier is available",
-    )
-    package.set_defaults(handler=command_package)
-
-    checksum = commands.add_parser(
-        "checksum", help="verify a complete archive set and write SHA256SUMS"
-    )
-    add_target_arguments(checksum)
-    checksum.set_defaults(handler=command_checksum)
-
-    verify_release = commands.add_parser(
-        "verify-release", help="verify clean source and the annotated version tag"
-    )
-    verify_release.set_defaults(handler=command_verify_release)
-
-    release = commands.add_parser(
-        "release", help="validate, build, and package an official tagged release"
-    )
-    add_target_arguments(release)
-    release.set_defaults(handler=command_release)
-
-    clean = commands.add_parser("clean", help="remove Cargo and release-tool artifacts")
-    clean.set_defaults(handler=command_clean)
-
-    list_targets = commands.add_parser("list-targets", help="show supported release targets")
-    list_targets.set_defaults(handler=command_list_targets)
-    return parser
-
-
 def main(argv: Sequence[str] | None = None) -> int:
-    if sys.version_info < (3, 11):
-        print("error: x.py requires Python 3.11 or newer", file=sys.stderr)
-        return 1
+    parser = argparse.ArgumentParser(description="Create and verify Vex release artifacts (invoked by Meson).")
+    commands = parser.add_subparsers(dest="command", required=True)
+    package = commands.add_parser("package")
+    package.add_argument("targets", nargs="+")
+    package.add_argument("--allow-unverified", action="store_true")
+    checksum = commands.add_parser("checksum")
+    checksum.add_argument("targets", nargs="+")
+    commands.add_parser("verify-source")
+    commands.add_parser("clean")
+    args = parser.parse_args(argv)
     try:
         version = load_version()
-    except ReleaseError as error:
-        print(f"error: {error}", file=sys.stderr)
-        return 1
-    parser = create_parser(version)
-    args = parser.parse_args(argv)
-    if not hasattr(args, "handler"):
-        parser.print_help()
-        return 0
-    try:
-        args.handler(args)
-    except ReleaseError as error:
+        if args.command == "package":
+            package_targets(select_targets(args.targets), version, detect_host_target(),
+                            allow_unverified=args.allow_unverified)
+        elif args.command == "checksum":
+            path = write_checksums(collect_release_archives(select_targets(args.targets), version))
+            status("Checksums", str(path.relative_to(ROOT)))
+        elif args.command == "verify-source":
+            verify_release_source(version)
+            status("Verified", f"clean source at annotated tag v{version}")
+        elif DIST_DIR.exists():
+            shutil.rmtree(DIST_DIR)
+    except (ReleaseError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

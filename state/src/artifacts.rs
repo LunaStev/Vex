@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
 //! Conservative ownership of compiler outputs. All registry access is made
 //! while the caller owns the project guard; run leases outlive that guard.
 use crate::{atomic_rename, ensure_dir, inherit, reject_link, Guard};
@@ -190,7 +194,7 @@ fn fingerprint(path: &Path) -> Result<Option<String>, String> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(Some(format!("{:x}", hash.finalize())))
+    Ok(Some(hex_digest(hash.finalize())))
 }
 
 /// Kept alive during compilation and after releasing the project guard, through
@@ -591,4 +595,19 @@ pub fn clean(
         write(root, &registry)?;
     }
     Ok(())
+}
+// Keep persisted IDs/checksums as zero-padded lowercase SHA-256 hex. The
+// digest output type no longer implements LowerHex in sha2 0.11.
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .as_ref()
+        .iter()
+        .flat_map(|&byte| {
+            [
+                char::from(DIGITS[(byte >> 4) as usize]),
+                char::from(DIGITS[(byte & 15) as usize]),
+            ]
+        })
+        .collect()
 }

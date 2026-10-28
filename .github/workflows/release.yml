@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+# SPDX-License-Identifier: MPL-2.0
 name: Release
 
 on:
@@ -78,7 +82,7 @@ jobs:
 
           python tools/release_version.py "$RELEASE_VERSION"
 
-          cargo_version="$(python x.py --version | awk '{print $2}')"
+          cargo_version="$(python tools/build_config.py version)"
           if [[ "$cargo_version" != "$RELEASE_VERSION" ]]; then
             echo "error: Cargo.toml version is $cargo_version, input is $RELEASE_VERSION" >&2
             exit 1
@@ -96,8 +100,12 @@ jobs:
       - name: Audit locked release dependencies
         run: python tools/dependency_audit.py
 
+      - name: Install build automation
+        run: python -m pip install -r tools/requirements-build.txt ninja==1.13.0
       - name: Run release validation
-        run: python x.py check
+        run: |
+          meson setup build
+          meson compile -C build check
 
   build:
     name: Package / ${{ matrix.id }}
@@ -166,6 +174,7 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.commit }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Install Rust toolchain
         if: matrix.executor == 'native'
         run: |
@@ -173,27 +182,41 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
           rustup default 1.96.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        if: matrix.executor == 'native'
+        if: matrix.executor != 'vm'
         with:
           python-version: '3.11'
+      - name: Install build automation
+        if: matrix.executor == 'native'
+        run: python -m pip install -r tools/requirements-build.txt ninja==1.13.0
       - name: Complete native acceptance
         if: matrix.executor == 'native'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python tools/ci_platform.py ${{ matrix.id }}
+        run: |
+          meson setup build -Drelease_targets=${{ matrix.target }} -Dacceptance_platform=${{ matrix.id }}
+          meson compile -C build acceptance
       - name: Register target execution
         if: matrix.executor == 'qemu'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
           image: tonistiigi/binfmt@sha256:465d3fdd28d0f2b871ba4b4ec98bd183292e96167f00d9fd40bd249f8632d705
           platforms: riscv64,loong64
+      - name: Install amd64 cross-build toolchain
+        if: matrix.executor == 'qemu'
+        run: |
+          rustup set default-host x86_64-unknown-linux-gnu
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup target add ${{ matrix.target }}
       - name: Complete emulated acceptance
         if: matrix.executor == 'qemu'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          docker run --rm --platform '${{ matrix.oci_platform }}' \
-            -v "$PWD:/work" -w /work '${{ matrix.image }}' \
-            sh tools/ci_guest.sh '${{ matrix.id }}'
+          python3 -m pip install -r tools/requirements-build.txt ninja==1.13.0
+          meson setup build -Drelease_targets=${{ matrix.target }} -Dacceptance_platform=${{ matrix.id }}
+          meson compile -C build acceptance
       - name: Complete FreeBSD acceptance
         if: matrix.executor == 'vm'
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
@@ -244,6 +267,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install build automation
+        run: python -m pip install -r tools/requirements-build.txt ninja==1.13.0
+
       - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -256,16 +282,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          python x.py checksum \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu \
-            riscv64gc-unknown-linux-gnu \
-            loongarch64-unknown-linux-gnu \
-            x86_64-apple-darwin \
-            aarch64-apple-darwin \
-            x86_64-pc-windows-msvc \
-            aarch64-pc-windows-msvc \
-            x86_64-unknown-freebsd
+          meson setup build -Drelease_targets=x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,riscv64gc-unknown-linux-gnu,loongarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc,aarch64-pc-windows-msvc,x86_64-unknown-freebsd
+          meson compile -C build checksum
           cd dist
           sha256sum --check SHA256SUMS
 
